@@ -105,19 +105,99 @@ def ensure_spreadsheet(sa_info: dict, spreadsheet_id: str) -> str:
 
 
 def write_rows(sa_info: dict, spreadsheet_id: str, rows: list[list[Any]]) -> dict:
-    """Clear sheet1 and write the given matrix of rows starting from A1."""
+    """Clear sheet1 and write the given matrix of rows starting from A1.
+    Also applies basic styling: bold/colored header, frozen first row,
+    auto-fit columns, currency format on numeric cols, alternating row banding."""
     _, sheets = _services(sa_info)
     try:
+        # Find the first sheet's tab id (gid) — needed for batchUpdate styling.
+        meta = sheets.spreadsheets().get(spreadsheetId=spreadsheet_id, fields="sheets(properties(sheetId,title))").execute()
+        first_sheet = meta["sheets"][0]["properties"]
+        sheet_gid = first_sheet["sheetId"]
+        sheet_title = first_sheet["title"]
+
+        # 1. Clear old content
         sheets.spreadsheets().values().clear(
             spreadsheetId=spreadsheet_id,
-            range="A1:Z100000",
+            range=f"'{sheet_title}'!A1:Z100000",
         ).execute()
+
+        # 2. Write new values
         result = sheets.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
-            range="A1",
+            range=f"'{sheet_title}'!A1",
             valueInputOption="USER_ENTERED",
             body={"values": rows},
         ).execute()
+
+        # 3. Apply styling via batchUpdate
+        num_cols = max((len(r) for r in rows), default=0)
+        num_rows = len(rows)
+        currency_cols = []  # 0-indexed: Price=7, Total=8, Advance=9, Balance=10
+        if num_cols >= 11:
+            currency_cols = [7, 8, 9, 10]
+        requests = [
+            # Freeze first row
+            {"updateSheetProperties": {
+                "properties": {"sheetId": sheet_gid, "gridProperties": {"frozenRowCount": 1}},
+                "fields": "gridProperties.frozenRowCount",
+            }},
+            # Header row: bold white text on blue background, centered
+            {"repeatCell": {
+                "range": {"sheetId": sheet_gid, "startRowIndex": 0, "endRowIndex": 1, "startColumnIndex": 0, "endColumnIndex": num_cols},
+                "cell": {"userEnteredFormat": {
+                    "backgroundColor": {"red": 0.145, "green": 0.388, "blue": 0.922},
+                    "horizontalAlignment": "CENTER",
+                    "verticalAlignment": "MIDDLE",
+                    "textFormat": {"bold": True, "fontSize": 11, "foregroundColor": {"red": 1, "green": 1, "blue": 1}},
+                    "padding": {"top": 6, "bottom": 6, "left": 6, "right": 6},
+                }},
+                "fields": "userEnteredFormat(backgroundColor,horizontalAlignment,verticalAlignment,textFormat,padding)",
+            }},
+            # Body: borders + middle align
+            {"repeatCell": {
+                "range": {"sheetId": sheet_gid, "startRowIndex": 1, "endRowIndex": num_rows, "startColumnIndex": 0, "endColumnIndex": num_cols},
+                "cell": {"userEnteredFormat": {
+                    "verticalAlignment": "MIDDLE",
+                    "textFormat": {"fontSize": 10},
+                }},
+                "fields": "userEnteredFormat(verticalAlignment,textFormat)",
+            }},
+            # Banding (alternating row colors)
+            {"addBanding": {"bandedRange": {
+                "range": {"sheetId": sheet_gid, "startRowIndex": 0, "endRowIndex": num_rows, "startColumnIndex": 0, "endColumnIndex": num_cols},
+                "rowProperties": {
+                    "headerColor": {"red": 0.145, "green": 0.388, "blue": 0.922},
+                    "firstBandColor": {"red": 1, "green": 1, "blue": 1},
+                    "secondBandColor": {"red": 0.949, "green": 0.965, "blue": 1.0},
+                },
+            }}},
+            # Auto-resize all columns
+            {"autoResizeDimensions": {"dimensions": {
+                "sheetId": sheet_gid, "dimension": "COLUMNS",
+                "startIndex": 0, "endIndex": num_cols,
+            }}},
+        ]
+        # Currency format (INR) on price/total/advance/balance cols
+        for col in currency_cols:
+            requests.append({"repeatCell": {
+                "range": {"sheetId": sheet_gid, "startRowIndex": 1, "endRowIndex": num_rows, "startColumnIndex": col, "endColumnIndex": col + 1},
+                "cell": {"userEnteredFormat": {
+                    "numberFormat": {"type": "NUMBER", "pattern": "#,##,##0.00"},
+                    "horizontalAlignment": "RIGHT",
+                }},
+                "fields": "userEnteredFormat(numberFormat,horizontalAlignment)",
+            }})
+        try:
+            sheets.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id, body={"requests": requests}
+            ).execute()
+        except HttpError:
+            # Banding already exists (re-sync) — retry without banding request.
+            requests_no_banding = [r for r in requests if "addBanding" not in r]
+            sheets.spreadsheets().batchUpdate(
+                spreadsheetId=spreadsheet_id, body={"requests": requests_no_banding}
+            ).execute()
     except HttpError as e:
         raise GDriveError(f"Sheet write failed: {e}")
     return {

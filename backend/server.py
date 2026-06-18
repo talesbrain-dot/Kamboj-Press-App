@@ -111,6 +111,7 @@ class SettingsIn(BaseModel):
     reminder_delivery_days: Optional[int] = None
     reminder_payment_days: Optional[int] = None
     custom_reminders: Optional[List[dict]] = None
+    invoice_terms: Optional[str] = None
 
 class DismissIn(BaseModel):
     key: str
@@ -558,6 +559,7 @@ DEFAULT_SETTINGS = {
     "reminder_delivery_days": 7,
     "reminder_payment_days": 10,
     "custom_reminders": [],
+    "invoice_terms": "1. Goods once sold will not be taken back.\n2. Payment due within 7 days of delivery.\n3. Subject to local jurisdiction.",
     "dismissed_reminders": [],
 }
 
@@ -670,7 +672,7 @@ async def _order_summary_rows(include_serial: bool = True) -> list:
         else:
             order_date = ""
 
-        order_total = sum(float(p.get("price") or 0) * float(p.get("quantity") or 0) for p in products)
+        order_total = sum(float(p.get("price") or 0) for p in products)
         advance = float(o.get("advance_paid") or 0)
         payments_sum = sum(float(p.get("amount") or 0) for p in (o.get("payments") or []))
         paid = advance + payments_sum
@@ -678,8 +680,8 @@ async def _order_summary_rows(include_serial: bool = True) -> list:
 
         for idx, p in enumerate(products):
             qty = float(p.get("quantity") or 0)
-            price = float(p.get("price") or 0)
-            line_total = qty * price
+            line_total = float(p.get("price") or 0)
+            unit_price = (line_total / qty) if qty else line_total
             if idx == 0:
                 row = [
                     serial,
@@ -689,7 +691,7 @@ async def _order_summary_rows(include_serial: bool = True) -> list:
                     o.get("customer_phone") or "",
                     qty,
                     p.get("name") or "",
-                    price,
+                    round(unit_price, 2),
                     round(line_total, 2),
                     round(advance, 2) if advance else "",
                     round(balance, 2) if balance else "",
@@ -699,7 +701,7 @@ async def _order_summary_rows(include_serial: bool = True) -> list:
                     "", "", "", "", "",
                     qty,
                     p.get("name") or "",
-                    price,
+                    round(unit_price, 2),
                     round(line_total, 2),
                     "", "",
                 ]
@@ -1006,10 +1008,12 @@ async def _save_gdrive_config(update: dict) -> dict:
 
 def _public_gdrive_status(cfg: Optional[dict]) -> dict:
     if not cfg:
-        return {"connected": False}
+        return {"connected": False, "has_config": False}
     sa = cfg.get("service_account_json") or {}
+    has_config = bool(cfg.get("service_account_json") or cfg.get("spreadsheet_id") or cfg.get("folder_id"))
     return {
         "connected": bool(cfg.get("service_account_json") and cfg.get("spreadsheet_id")),
+        "has_config": has_config,
         "auto_sync": bool(cfg.get("auto_sync", True)),
         "service_account_email": sa.get("client_email"),
         "spreadsheet_id": cfg.get("spreadsheet_id"),
@@ -1156,7 +1160,7 @@ async def gdrive_toggle_auto(data: dict, admin=Depends(require_admin)):
 @api.delete("/gdrive/disconnect")
 async def gdrive_disconnect(admin=Depends(require_admin)):
     await db.gdrive_config.delete_one({"id": "default"})
-    return {"connected": False}
+    return {"connected": False, "has_config": False}
 
 # ---------- Stats ----------
 @app.get("/stats")

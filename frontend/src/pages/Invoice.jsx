@@ -149,6 +149,13 @@ export default function Invoice() {
           </div>
         )}
 
+        {settings?.invoice_terms && (
+          <div className="mt-6 pt-4 border-t border-slate-200" data-testid="invoice-terms">
+            <p className="text-xs uppercase text-slate-500 font-medium">Terms &amp; Conditions</p>
+            <div className="text-xs mt-1 whitespace-pre-wrap text-slate-700 leading-relaxed">{settings.invoice_terms}</div>
+          </div>
+        )}
+
         <p className="text-center text-xs text-slate-500 mt-8 pt-4 border-t border-slate-200">Thank you for your business!</p>
       </div>
     </div>

@@ -60,6 +60,7 @@ export default function Settings() {
         reminder_delivery_days: Number(s.reminder_delivery_days) || 7,
         reminder_payment_days: Number(s.reminder_payment_days) || 10,
         custom_reminders: s.custom_reminders || [],
+        invoice_terms: s.invoice_terms || '',
       });
       setS(r.data);
       refreshBranding();
@@ -203,16 +204,19 @@ export default function Settings() {
   };
 
   const disconnectGdrive = async () => {
-    if (!window.confirm('Disconnect Google Drive? Sheet Drive me rahegi, lekin app sync band kar dega.')) return;
+    if (!window.confirm('Disconnect Google Drive? App sync band kar dega.')) return;
     setGdriveLoading(true);
     try {
-      await api.delete('/gdrive/disconnect');
-      setGdrive({ connected: false });
+      const r = await api.delete('/gdrive/disconnect');
+      // Force fresh status from server so the UI reflects backend truth.
+      setGdrive(r.data || { connected: false, has_config: false });
+      await loadGdrive();
       toast({ title: 'Disconnected' });
     } catch (e) {
+      console.error('disconnect error', e);
       toast({
         title: 'Disconnect failed',
-        description: e?.response?.data?.detail || e?.message || 'Try again',
+        description: e?.response?.data?.detail || e?.message || 'Network error — backend log check karein.',
         variant: 'destructive',
       });
     } finally { setGdriveLoading(false); }
@@ -293,6 +297,20 @@ export default function Settings() {
         </div>
       </Card>
 
+      <Card className="p-5 space-y-3" data-testid="invoice-terms-card">
+        <h2 className="font-medium">Invoice — Terms &amp; Conditions</h2>
+        <p className="text-sm text-slate-500 dark:text-slate-400">Yeh text har invoice ke bottom me automatically print hoga. Multi-line lik sakte ho (Enter dabakar).</p>
+        <Textarea
+          rows={5}
+          placeholder={"1. Goods once sold will not be taken back.\n2. Payment due within 7 days of delivery.\n3. Subject to local jurisdiction."}
+          value={s.invoice_terms || ''}
+          onChange={(e) => update('invoice_terms', e.target.value)}
+          data-testid="invoice-terms-textarea"
+          className="font-mono text-sm"
+        />
+        <p className="text-xs text-slate-400">Save Settings click karke save karna na bhulein.</p>
+      </Card>
+
       <Card className="p-5 space-y-3">
         <h2 className="font-medium">Data Backup</h2>
         <p className="text-sm text-slate-500 dark:text-slate-400">Download a full Excel (.xlsx) snapshot with separate sheets for orders, products, payments, customers and outstanding balances.</p>
@@ -330,6 +348,14 @@ export default function Settings() {
 
         {!gdrive?.connected ? (
           <div className="space-y-3">
+            {gdrive?.has_config && (
+              <div className="text-xs bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-200 rounded p-2 border border-amber-200 dark:border-amber-900 flex items-center justify-between gap-2">
+                <span>⚠️ Purana incomplete config mila. Naya connect karne se pehle reset karein.</span>
+                <Button type="button" variant="ghost" size="sm" onClick={disconnectGdrive} disabled={gdriveLoading} className="text-rose-600 hover:text-rose-700 shrink-0" data-testid="gdrive-reset-btn">
+                  <CloudOff className="w-3.5 h-3.5 mr-1" />Reset
+                </Button>
+              </div>
+            )}
             <details className="text-sm bg-slate-50 dark:bg-slate-800/40 rounded-md p-3 border border-slate-200 dark:border-slate-800" open>
               <summary className="cursor-pointer font-medium">Setup steps (one-time)</summary>
               <ol className="list-decimal pl-5 mt-2 space-y-1 text-slate-600 dark:text-slate-300 text-xs leading-relaxed">
