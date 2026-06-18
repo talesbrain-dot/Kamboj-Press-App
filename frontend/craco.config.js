@@ -1,6 +1,12 @@
 // craco.config.js
 const path = require("path");
-require("dotenv").config();
+try {
+  // dotenv is a transitive dep via react-scripts; on some npm hoisting setups
+  // (e.g. Vercel) it may not be reachable here. Make it optional.
+  require("dotenv").config();
+} catch (e) {
+  // Vercel/CI inject env vars natively, so this is safe to ignore.
+}
 
 // Check if we're in development/preview mode (not production build)
 // Craco sets NODE_ENV=development for start, NODE_ENV=production for build
