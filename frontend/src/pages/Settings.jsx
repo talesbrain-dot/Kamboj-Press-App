@@ -6,18 +6,36 @@ import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Textarea } from '../components/ui/textarea';
-import { Trash2, Plus, Upload, Loader2, Download } from 'lucide-react';
+import { Trash2, Plus, Upload, Loader2, Download, FileSpreadsheet, Cloud, CloudOff, RefreshCw, ExternalLink } from 'lucide-react';
 import { useToast } from '../hooks/use-toast';
 
 export default function Settings() {
   const { toast } = useToast();
   const { refresh: refreshBranding } = useBranding();
   const fileRef = useRef(null);
+  const gdriveFileRef = useRef(null);
   const [s, setS] = useState(null);
   const [saving, setSaving] = useState(false);
   const [newReminder, setNewReminder] = useState({ label: '', days: 3 });
 
-  useEffect(() => { api.get('/settings').then((r) => setS(r.data)); }, []);
+  // Google Drive state
+  const [gdrive, setGdrive] = useState(null);
+  const [gdriveLoading, setGdriveLoading] = useState(false);
+  const [gdriveJson, setGdriveJson] = useState(null);
+  const [gdriveJsonName, setGdriveJsonName] = useState('');
+  const [gdriveFolderId, setGdriveFolderId] = useState('');
+
+  useEffect(() => {
+    api.get('/settings').then((r) => setS(r.data));
+    loadGdrive();
+  }, []);
+
+  const loadGdrive = async () => {
+    try {
+      const r = await api.get('/gdrive/status');
+      setGdrive(r.data);
+    } catch (e) { /* not admin or not configured */ }
+  };
 
   const update = (k, v) => setS((p) => ({ ...p, [k]: v }));
 
@@ -87,6 +105,111 @@ export default function Settings() {
     } catch (e) {
       toast({ title: 'Backup failed', variant: 'destructive' });
     }
+  };
+
+  const exportSummary = async () => {
+    try {
+      const r = await api.get('/backup/summary', { responseType: 'blob' });
+      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      const blob = new Blob([r.data], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `order-summary-${stamp}.xlsx`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+      toast({ title: 'Order summary downloaded' });
+    } catch (e) {
+      toast({ title: 'Download failed', variant: 'destructive' });
+    }
+  };
+
+  // ---------- Google Drive ----------
+  const onGdriveJson = (e) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    if (!f.name.toLowerCase().endsWith('.json')) {
+      toast({ title: 'JSON file chahiye', variant: 'destructive' });
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const parsed = JSON.parse(reader.result);
+        if (parsed.type !== 'service_account' || !parsed.client_email) {
+          throw new Error('Not a service-account JSON');
+        }
+        setGdriveJson(parsed);
+        setGdriveJsonName(f.name);
+        toast({ title: 'JSON loaded', description: parsed.client_email });
+      } catch (err) {
+        toast({ title: 'Invalid service-account JSON', variant: 'destructive' });
+      }
+    };
+    reader.readAsText(f);
+  };
+
+  const connectGdrive = async () => {
+    if (!gdriveJson) { toast({ title: 'Service-account JSON select karein', variant: 'destructive' }); return; }
+    if (!gdriveFolderId.trim()) { toast({ title: 'Drive folder ID dijiye', variant: 'destructive' }); return; }
+    setGdriveLoading(true);
+    try {
+      const r = await api.post('/gdrive/connect', {
+        service_account_json: gdriveJson,
+        folder_id: gdriveFolderId.trim(),
+        auto_sync: true,
+      });
+      setGdrive(r.data);
+      setGdriveJson(null);
+      setGdriveJsonName('');
+      setGdriveFolderId('');
+      toast({ title: 'Google Drive connected', description: r.data.spreadsheet_url ? 'Sheet ban gayi.' : '' });
+    } catch (e) {
+      toast({
+        title: 'Connect failed',
+        description: e?.response?.data?.detail || 'Try again',
+        variant: 'destructive',
+      });
+    } finally { setGdriveLoading(false); }
+  };
+
+  const syncGdriveNow = async () => {
+    setGdriveLoading(true);
+    try {
+      const r = await api.post('/gdrive/sync');
+      toast({ title: 'Synced to Drive', description: `${r.data.rows} rows updated.` });
+      await loadGdrive();
+    } catch (e) {
+      toast({
+        title: 'Sync failed',
+        description: e?.response?.data?.detail || 'Try again',
+        variant: 'destructive',
+      });
+    } finally { setGdriveLoading(false); }
+  };
+
+  const toggleAutoSync = async () => {
+    if (!gdrive) return;
+    try {
+      const r = await api.patch('/gdrive/auto-sync', { auto_sync: !gdrive.auto_sync });
+      setGdrive(r.data);
+    } catch (e) {
+      toast({ title: 'Update failed', variant: 'destructive' });
+    }
+  };
+
+  const disconnectGdrive = async () => {
+    if (!window.confirm('Disconnect Google Drive? Sheet Drive me rahegi, lekin app sync band kar dega.')) return;
+    setGdriveLoading(true);
+    try {
+      await api.delete('/gdrive/disconnect');
+      setGdrive({ connected: false });
+      toast({ title: 'Disconnected' });
+    } finally { setGdriveLoading(false); }
   };
 
   if (!s) return <div className="p-10 text-center text-slate-500">Loading...</div>;
@@ -170,6 +293,132 @@ export default function Settings() {
         <Button type="button" variant="outline" onClick={exportBackup} data-testid="export-backup-btn">
           <Download className="w-4 h-4 mr-2" />Export Backup (Excel)
         </Button>
+      </Card>
+
+      <Card className="p-5 space-y-3">
+        <h2 className="font-medium flex items-center gap-2"><FileSpreadsheet className="w-4 h-4" />Order Summary Export</h2>
+        <p className="text-sm text-slate-500 dark:text-slate-400">
+          Compact table — one row per product with order no., date, customer, phone, qty, product, price, total, advance, balance.
+        </p>
+        <Button type="button" variant="outline" onClick={exportSummary} data-testid="export-summary-btn">
+          <Download className="w-4 h-4 mr-2" />Download Order Summary (Excel)
+        </Button>
+      </Card>
+
+      <Card className="p-5 space-y-4" data-testid="gdrive-card">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="font-medium flex items-center gap-2">
+              <Cloud className="w-4 h-4 text-blue-600" />Google Drive Auto-Sync
+            </h2>
+            <p className="text-sm text-slate-500 dark:text-slate-400 mt-1">
+              Har order change pe order summary automatically aapki Drive ki Google Sheet me sync ho jayegi.
+            </p>
+          </div>
+          {gdrive?.connected && (
+            <span className="inline-flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-full bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300">
+              <Cloud className="w-3 h-3" />Connected
+            </span>
+          )}
+        </div>
+
+        {!gdrive?.connected ? (
+          <div className="space-y-3">
+            <details className="text-sm bg-slate-50 dark:bg-slate-800/40 rounded-md p-3 border border-slate-200 dark:border-slate-800">
+              <summary className="cursor-pointer font-medium">Setup steps (one-time)</summary>
+              <ol className="list-decimal pl-5 mt-2 space-y-1 text-slate-600 dark:text-slate-300 text-xs leading-relaxed">
+                <li>Go to <a className="text-blue-600 underline" href="https://console.cloud.google.com/" target="_blank" rel="noreferrer">console.cloud.google.com</a> → create a project (free).</li>
+                <li><b>APIs &amp; Services → Library</b> → enable <b>Google Drive API</b> and <b>Google Sheets API</b>.</li>
+                <li><b>IAM &amp; Admin → Service Accounts → Create Service Account</b>. Give it any name (no roles needed). Click Done.</li>
+                <li>Open the service account → <b>Keys → Add Key → Create new key → JSON</b>. A JSON file downloads — keep it safe.</li>
+                <li>Open Google Drive, create a folder (e.g. <i>Kamboj Press Sync</i>). Right-click → <b>Share</b> → paste the <code>client_email</code> from the JSON (looks like <code>xxx@xxx.iam.gserviceaccount.com</code>) → set <b>Editor</b>.</li>
+                <li>Open that folder in browser and copy the folder ID from the URL — the long string after <code>/folders/</code>.</li>
+                <li>Yahan upload karo JSON + paste folder ID → Connect.</li>
+              </ol>
+            </details>
+
+            <div className="space-y-2">
+              <Label>Service-Account JSON</Label>
+              <div className="flex items-center gap-2">
+                <input ref={gdriveFileRef} type="file" accept="application/json,.json" onChange={onGdriveJson} className="hidden" />
+                <Button type="button" variant="outline" size="sm" onClick={() => gdriveFileRef.current?.click()} data-testid="gdrive-json-btn">
+                  <Upload className="w-4 h-4 mr-2" />Select JSON
+                </Button>
+                {gdriveJsonName && (
+                  <span className="text-xs text-slate-500 truncate">{gdriveJsonName} — {gdriveJson?.client_email}</span>
+                )}
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              <Label>Drive Folder ID</Label>
+              <Input
+                placeholder="e.g. 1A2B3cD4e5F6gH7iJ8kL9mN0o"
+                value={gdriveFolderId}
+                onChange={(e) => setGdriveFolderId(e.target.value)}
+                data-testid="gdrive-folder-input"
+              />
+              <p className="text-xs text-slate-500">Folder URL me <code>/folders/&lt;ID&gt;</code> ke baad ka string.</p>
+            </div>
+
+            <Button
+              type="button"
+              onClick={connectGdrive}
+              disabled={gdriveLoading || !gdriveJson || !gdriveFolderId.trim()}
+              className="bg-blue-600 hover:bg-blue-700 text-white"
+              data-testid="gdrive-connect-btn"
+            >
+              {gdriveLoading && <Loader2 className="w-4 h-4 mr-2 animate-spin" />}
+              <Cloud className="w-4 h-4 mr-2" />Connect &amp; First Sync
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            <div className="grid sm:grid-cols-2 gap-3 text-sm">
+              <div>
+                <div className="text-xs text-slate-500 uppercase">Folder</div>
+                <div className="font-medium truncate">{gdrive.folder_name || gdrive.folder_id}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500 uppercase">Service Account</div>
+                <div className="font-mono text-xs truncate">{gdrive.service_account_email}</div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500 uppercase">Last Sync</div>
+                <div>
+                  {gdrive.last_sync_at ? new Date(gdrive.last_sync_at).toLocaleString('en-IN') : 'Never'}
+                  {gdrive.last_sync_status === 'ok' && <span className="text-emerald-600 ml-2">✓</span>}
+                  {gdrive.last_sync_status === 'error' && <span className="text-rose-600 ml-2">✗ {gdrive.last_sync_error}</span>}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-slate-500 uppercase">Auto-Sync</div>
+                <button
+                  onClick={toggleAutoSync}
+                  className={`mt-1 inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${gdrive.auto_sync ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-200 text-slate-600'}`}
+                  data-testid="gdrive-autosync-toggle"
+                >
+                  {gdrive.auto_sync ? 'ON — click to disable' : 'OFF — click to enable'}
+                </button>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2 pt-2">
+              {gdrive.spreadsheet_url && (
+                <a href={gdrive.spreadsheet_url} target="_blank" rel="noreferrer" data-testid="gdrive-open-sheet">
+                  <Button type="button" variant="outline" size="sm"><ExternalLink className="w-4 h-4 mr-2" />Open Sheet</Button>
+                </a>
+              )}
+              <Button type="button" variant="outline" size="sm" onClick={syncGdriveNow} disabled={gdriveLoading} data-testid="gdrive-sync-btn">
+                {gdriveLoading ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-2" />}
+                Sync Now
+              </Button>
+              <Button type="button" variant="ghost" size="sm" onClick={disconnectGdrive} disabled={gdriveLoading} className="text-rose-600 hover:text-rose-700" data-testid="gdrive-disconnect-btn">
+                <CloudOff className="w-4 h-4 mr-2" />Disconnect
+              </Button>
+            </div>
+          </div>
+        )}
       </Card>
 
       <div className="flex justify-end">

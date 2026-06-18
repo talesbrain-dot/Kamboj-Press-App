@@ -18,6 +18,10 @@ from passlib.context import CryptContext
 from pymongo import ReturnDocument
 from openpyxl import Workbook
 from openpyxl.styles import Font, PatternFill, Alignment
+import asyncio
+import json
+
+import gdrive
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -339,6 +343,7 @@ async def create_order(data: OrderCreate, user=Depends(get_current_user)):
         "updated_at": now,
     }
     await db.orders.insert_one(order)
+    schedule_gdrive_sync()
     return serialize_order(order)
 
 @api.get("/orders")
@@ -408,6 +413,7 @@ async def update_order(order_id: str, data: OrderUpdateIn, user=Depends(get_curr
 
     await db.orders.update_one({"id": order_id}, {"$set": update})
     o = await db.orders.find_one({"id": order_id})
+    schedule_gdrive_sync()
     return serialize_order(o)
 
 @api.patch("/orders/{order_id}/products/{product_id}")
@@ -426,6 +432,7 @@ async def update_product_status(order_id: str, product_id: str, data: StatusUpda
     if res.matched_count == 0:
         raise HTTPException(404, "Product not found in order")
     o = await db.orders.find_one({"id": order_id})
+    schedule_gdrive_sync()
     return serialize_order(o)
 
 @api.post("/orders/{order_id}/payments")
@@ -437,6 +444,7 @@ async def add_payment(order_id: str, data: PaymentIn, user=Depends(get_current_u
     payment = {"id": str(uuid.uuid4()), "amount": data.amount, "note": data.note or "", "at": datetime.now(timezone.utc), "by": user["name"]}
     await db.orders.update_one({"id": order_id}, {"$push": {"payments": payment}, "$set": {"updated_at": datetime.now(timezone.utc)}})
     o = await db.orders.find_one({"id": order_id})
+    schedule_gdrive_sync()
     return serialize_order(o)
 
 @api.delete("/orders/{order_id}")
@@ -444,6 +452,7 @@ async def delete_order(order_id: str, admin=Depends(require_admin)):
     res = await db.orders.delete_one({"id": order_id})
     if res.deleted_count == 0:
         raise HTTPException(404, "Order not found")
+    schedule_gdrive_sync()
     return {"ok": True}
 
 # ---------- Reminders ----------
@@ -621,6 +630,116 @@ def _autosize(ws):
             if length > max_len:
                 max_len = length
         ws.column_dimensions[letter].width = min(max(max_len + 2, 12), 50)
+
+
+async def _order_summary_rows(include_serial: bool = True) -> list:
+    """Build the compact 'order summary' table as a list-of-lists (header + rows).
+
+    Layout (matches the user's screenshot): one row per product. The order-level
+    fields (#, OrderNo, OrderDate, CustomerName, Phone, Advance, Balance) are
+    only filled on the first product row of each order. Per-product fields
+    (Qty, Product, Price, Total = Price*Qty) appear on every row.
+    """
+    orders = await db.orders.find().sort("created_at", 1).to_list(100000)
+    header = [
+        "#", "Order No", "Order Date", "Customer Name", "Phone",
+        "Qty", "Product", "Price", "Total", "Advance", "Balance",
+    ]
+    if not include_serial:
+        header = header[1:]
+    rows = [header]
+
+    ist_offset = timedelta(hours=5, minutes=30)
+    serial = 0
+    for o in orders:
+        products = o.get("products") or []
+        if not products:
+            continue
+        serial += 1
+        created = o.get("created_at")
+        if isinstance(created, str):
+            try:
+                created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            except Exception:
+                created = None
+        if isinstance(created, datetime):
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            local = created.astimezone(timezone(ist_offset))
+            order_date = local.strftime("%d-%m-%Y %I:%M %p")
+        else:
+            order_date = ""
+
+        order_total = sum(float(p.get("price") or 0) * float(p.get("quantity") or 0) for p in products)
+        advance = float(o.get("advance_paid") or 0)
+        payments_sum = sum(float(p.get("amount") or 0) for p in (o.get("payments") or []))
+        paid = advance + payments_sum
+        balance = max(order_total - paid, 0)
+
+        for idx, p in enumerate(products):
+            qty = float(p.get("quantity") or 0)
+            price = float(p.get("price") or 0)
+            line_total = qty * price
+            if idx == 0:
+                row = [
+                    serial,
+                    o.get("order_no") or "",
+                    order_date,
+                    o.get("customer_name") or "",
+                    o.get("customer_phone") or "",
+                    qty,
+                    p.get("name") or "",
+                    price,
+                    round(line_total, 2),
+                    round(advance, 2) if advance else "",
+                    round(balance, 2) if balance else "",
+                ]
+            else:
+                row = [
+                    "", "", "", "", "",
+                    qty,
+                    p.get("name") or "",
+                    price,
+                    round(line_total, 2),
+                    "", "",
+                ]
+            if not include_serial:
+                row = row[1:]
+            rows.append(row)
+    return rows
+
+
+async def _build_order_summary_workbook() -> bytes:
+    rows = await _order_summary_rows(include_serial=True)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Order Summary"
+    for r in rows:
+        ws.append(r)
+    # Style header
+    bold = Font(bold=True, color="FFFFFF")
+    fill = PatternFill("solid", fgColor="2563EB")
+    center = Alignment(horizontal="center", vertical="center")
+    for cell in ws[1]:
+        cell.font = bold
+        cell.fill = fill
+        cell.alignment = center
+    # Auto width
+    for col_idx, col_cells in enumerate(ws.columns, start=1):
+        letter = col_cells[0].column_letter
+        max_len = 0
+        for cell in col_cells:
+            v = cell.value
+            if v is None:
+                continue
+            length = len(str(v))
+            if length > max_len:
+                max_len = length
+        ws.column_dimensions[letter].width = min(max(max_len + 2, 10), 40)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
 
 
 async def _build_backup_workbook() -> bytes:
@@ -849,6 +968,197 @@ async def export_backup(admin=Depends(require_admin)):
             "Access-Control-Expose-Headers": "Content-Disposition",
         },
     )
+
+
+@api.get("/backup/summary")
+async def export_order_summary(admin=Depends(require_admin)):
+    data = await _build_order_summary_workbook()
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"order-summary-{stamp}.xlsx"
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Access-Control-Expose-Headers": "Content-Disposition",
+        },
+    )
+
+
+# ---------- Google Drive Sync ----------
+_GDRIVE_SYNC_TASK: Optional[asyncio.Task] = None
+_GDRIVE_SYNC_DEBOUNCE_SEC = 3.0
+
+
+async def _load_gdrive_config() -> Optional[dict]:
+    return await db.gdrive_config.find_one({"id": "default"})
+
+
+async def _save_gdrive_config(update: dict) -> dict:
+    doc = await db.gdrive_config.find_one_and_update(
+        {"id": "default"},
+        {"$set": update, "$setOnInsert": {"id": "default"}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return doc
+
+
+def _public_gdrive_status(cfg: Optional[dict]) -> dict:
+    if not cfg:
+        return {"connected": False}
+    sa = cfg.get("service_account_json") or {}
+    return {
+        "connected": bool(cfg.get("service_account_json") and cfg.get("folder_id")),
+        "auto_sync": bool(cfg.get("auto_sync", True)),
+        "folder_id": cfg.get("folder_id"),
+        "folder_name": cfg.get("folder_name"),
+        "service_account_email": sa.get("client_email"),
+        "spreadsheet_id": cfg.get("spreadsheet_id"),
+        "spreadsheet_url": gdrive.sheet_url(cfg["spreadsheet_id"]) if cfg.get("spreadsheet_id") else None,
+        "last_sync_at": cfg.get("last_sync_at"),
+        "last_sync_status": cfg.get("last_sync_status"),
+        "last_sync_error": cfg.get("last_sync_error"),
+    }
+
+
+async def _do_gdrive_sync() -> dict:
+    cfg = await _load_gdrive_config()
+    if not cfg or not cfg.get("service_account_json") or not cfg.get("folder_id"):
+        raise GDriveNotConfigured("Google Drive abhi tak connect nahi hua hai.")
+    sa_info = cfg["service_account_json"]
+    folder_id = cfg["folder_id"]
+    title = cfg.get("sheet_title") or "Kamboj Press - Order Summary"
+    rows = await _order_summary_rows(include_serial=True)
+    try:
+        sheet_id = await asyncio.to_thread(
+            gdrive.ensure_spreadsheet, sa_info, folder_id, cfg.get("spreadsheet_id"), title
+        )
+        result = await asyncio.to_thread(gdrive.write_rows, sa_info, sheet_id, rows)
+    except gdrive.GDriveError as e:
+        await _save_gdrive_config({
+            "last_sync_status": "error",
+            "last_sync_error": str(e),
+            "last_sync_at": datetime.now(timezone.utc).isoformat(),
+        })
+        raise
+    await _save_gdrive_config({
+        "spreadsheet_id": sheet_id,
+        "last_sync_status": "ok",
+        "last_sync_error": None,
+        "last_sync_at": datetime.now(timezone.utc).isoformat(),
+        "last_sync_rows": result.get("updated_rows", 0),
+    })
+    return {
+        "spreadsheet_id": sheet_id,
+        "spreadsheet_url": gdrive.sheet_url(sheet_id),
+        "rows": result.get("updated_rows", 0),
+    }
+
+
+class GDriveNotConfigured(Exception):
+    pass
+
+
+async def _debounced_sync():
+    try:
+        await asyncio.sleep(_GDRIVE_SYNC_DEBOUNCE_SEC)
+        await _do_gdrive_sync()
+    except asyncio.CancelledError:
+        pass
+    except GDriveNotConfigured:
+        pass
+    except Exception as e:
+        logging.warning(f"GDrive auto-sync failed: {e}")
+
+
+def schedule_gdrive_sync() -> None:
+    """Fire-and-forget: schedule a debounced sync. Safe to call from any
+    order-mutating endpoint. If Drive isn't connected or auto-sync is off,
+    the task is a cheap no-op."""
+    global _GDRIVE_SYNC_TASK
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def _wrap():
+        cfg = await _load_gdrive_config()
+        if not cfg or not cfg.get("auto_sync", True):
+            return
+        if not cfg.get("service_account_json") or not cfg.get("folder_id"):
+            return
+        await _debounced_sync()
+
+    if _GDRIVE_SYNC_TASK and not _GDRIVE_SYNC_TASK.done():
+        _GDRIVE_SYNC_TASK.cancel()
+    _GDRIVE_SYNC_TASK = loop.create_task(_wrap())
+
+
+class GDriveConnectIn(BaseModel):
+    service_account_json: dict
+    folder_id: str
+    auto_sync: bool = True
+
+
+@api.get("/gdrive/status")
+async def gdrive_status(admin=Depends(require_admin)):
+    cfg = await _load_gdrive_config()
+    return _public_gdrive_status(cfg)
+
+
+@api.post("/gdrive/connect")
+async def gdrive_connect(data: GDriveConnectIn, admin=Depends(require_admin)):
+    sa = data.service_account_json
+    if not isinstance(sa, dict) or sa.get("type") != "service_account" or not sa.get("client_email"):
+        raise HTTPException(400, "Yeh service-account JSON valid nahi lag rahi. Google Cloud Console se naya key download karein.")
+    folder_id = (data.folder_id or "").strip()
+    if not folder_id:
+        raise HTTPException(400, "Drive folder ID zaruri hai.")
+    try:
+        meta = await asyncio.to_thread(gdrive.verify_connection, sa, folder_id)
+    except gdrive.GDriveError as e:
+        raise HTTPException(400, str(e))
+    await _save_gdrive_config({
+        "service_account_json": sa,
+        "folder_id": folder_id,
+        "folder_name": meta.get("name"),
+        "auto_sync": data.auto_sync,
+        "connected_at": datetime.now(timezone.utc).isoformat(),
+    })
+    # Run first sync immediately so the user sees data right away.
+    try:
+        sync_result = await _do_gdrive_sync()
+    except Exception as e:
+        raise HTTPException(400, f"Connected, but first sync failed: {e}")
+    cfg = await _load_gdrive_config()
+    out = _public_gdrive_status(cfg)
+    out["first_sync"] = sync_result
+    return out
+
+
+@api.post("/gdrive/sync")
+async def gdrive_sync_now(admin=Depends(require_admin)):
+    try:
+        result = await _do_gdrive_sync()
+    except GDriveNotConfigured as e:
+        raise HTTPException(400, str(e))
+    except gdrive.GDriveError as e:
+        raise HTTPException(400, str(e))
+    return result
+
+
+@api.patch("/gdrive/auto-sync")
+async def gdrive_toggle_auto(data: dict, admin=Depends(require_admin)):
+    await _save_gdrive_config({"auto_sync": bool(data.get("auto_sync", True))})
+    cfg = await _load_gdrive_config()
+    return _public_gdrive_status(cfg)
+
+
+@api.delete("/gdrive/disconnect")
+async def gdrive_disconnect(admin=Depends(require_admin)):
+    await db.gdrive_config.delete_one({"id": "default"})
+    return {"connected": False}
 
 # ---------- Stats ----------
 @app.get("/stats")

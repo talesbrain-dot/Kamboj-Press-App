@@ -1,66 +1,83 @@
 # Kamboj Press App — PRD
 
 ## Original Problem Statement
-React + FastAPI + MongoDB order management web app for a local print press. User (Hinglish speaker) imported existing codebase and requested bug fixes followed by 4 new features.
+React + FastAPI + MongoDB order management web app for a local print press. User (Hinglish speaker) imported existing codebase and is iteratively adding features.
 
-## Core Requirements / Personas
-- **Admin**: full access — manages customers, orders, payments, team, branding, backups, balances.
-- **Staff**: limited to orders assigned to them; can update product statuses but not record payments.
+## Personas
+- **Admin**: full access — manages customers, orders, payments, team, branding, backups, balances, Google Drive sync.
+- **Staff**: limited to assigned orders; can update product statuses but not record payments.
 
 ## Implemented (chronological)
 
-### Bug fixes (Iteration 1 — Feb 2026)
-- `GET /api/branding` endpoint + dynamic BrandingContext (app name, logo reflect in header/login/title).
-- `POST /api/reminders/dismiss` & `restore` routes for "Mark as Seen" / restore actions.
-- Status rename + auto-migration: `Cutting → Binding`, `Packing → Flex`; new `Screen Printing` status added. Updates flowed to `PRODUCT_STATUSES`, `STATUS_COLORS`, and order detail UI.
-- Backend `/api/backup` switched from JSON dict to a multi-sheet Excel workbook via `openpyxl`.
+### Iteration 1 — Initial bug fixes (Feb 2026)
+- `GET /api/branding` + dynamic BrandingContext.
+- `POST /api/reminders/dismiss` & `restore`.
+- Status rename + auto-migration: `Cutting → Binding`, `Packing → Flex`; new `Screen Printing` status.
+- `/api/backup` switched to multi-sheet Excel workbook via `openpyxl`.
 
-### New features (Iteration 2 — Feb 2026)
-- **Customers list balance** — `GET /api/customers` now aggregates `total_balance`, `total_orders`, `total_business`. `Customers.jsx` renders the balance per row (rose for >0, emerald for 0) with `data-testid="customer-balance-<id>"`.
-- **Inline status update in Production Queue** — `StatusQueue.jsx` now uses a per-row `Select` (`inline-status-<product_id>`) that calls `PATCH /api/orders/<order_id>/products/<product_id>`. Optimistic update via response payload; toast on success/failure; row disappears from current queue if status no longer matches.
-- **Balance page (`/balance`)** — new admin-only route backed by `GET /api/orders/balance/list`. Summary cards (Orders Pending, Total Outstanding, Combined Order Value), search input, list of orders with product status badges. Sidebar link with `Wallet` icon between Reminders and Customers.
-- **Excel backup download** — `Settings.jsx` now requests `/api/backup` with `responseType: 'blob'`, derives filename from `Content-Disposition`, and downloads the real `.xlsx` (validated PK header, 10.5 KB sample).
+### Iteration 2 — Quality of life (Feb 2026)
+- **Customers list balance** — `GET /api/customers` aggregates `total_balance`, `total_orders`, `total_business`; UI shows colored balance per row.
+- **Inline status update in Production Queue** — `PATCH /api/orders/<id>/products/<id>` from a Select on each queue row.
+- **Balance page (`/balance`)** — admin-only, lists outstanding orders, summary cards, search.
+- **Excel backup blob download** — `Settings.jsx` requests `/api/backup` with `responseType: 'blob'`.
+
+### Iteration 3 — Status + Reporting + Drive (Feb 2026)
+- **Sidebar rename**: "Digital Printing" → "Status"; default queue now opens at `Offset` filter.
+- **Order Summary export** — `GET /api/backup/summary` returns a compact Excel with one row per product. Columns: `#, Order No, Order Date, Customer, Phone, Qty, Product, Price, Total, Advance, Balance`. Order-level fields (no/date/customer/phone/advance/balance) appear only on first product row of each order (matches user's previous app layout).
+- **Google Drive auto-sync** — admin uploads a Service-Account JSON + Drive folder ID via Settings → app creates/updates a Google Sheet inside the folder. Auto-syncs after every order create / edit / status change / payment / delete (debounced 3s). Manual "Sync Now" + auto-sync toggle. Stored config: `db.gdrive_config.id='default'`.
 
 ## Tech Stack
 - Frontend: React 18, React Router, Tailwind, shadcn/ui, lucide-react, axios.
-- Backend: FastAPI, Motor (async MongoDB), `openpyxl` for Excel export.
-- Auth: JWT (bearer); admin seeded with `admin/admin123`.
+- Backend: FastAPI, Motor, `openpyxl`, `google-auth`, `google-api-python-client`.
+- Auth: JWT (bearer); admin seed `admin/admin123`.
 
 ## Architecture
 ```
 /app
 ├── backend/
-│   ├── server.py            # Routes, models, helpers, Excel backup builder
-│   ├── tests/backend_test.py# Pytest covering customers, balance list, status PATCH, backup
+│   ├── server.py            # Routes incl. /gdrive/*, /backup/summary
+│   ├── gdrive.py            # Service-account Drive/Sheets helpers
+│   ├── tests/backend_test.py
 │   └── requirements.txt
 ├── frontend/src/
 │   ├── pages/               # Dashboard, Customers, CustomerDetail, NewOrder, OrderDetail,
 │   │                          EditOrder, Invoice, Reminders, StatusQueue, Balance, Settings,
 │   │                          Users, Login
-│   ├── components/Layout.jsx (sidebar incl. Balance)
-│   ├── context/             # Auth, Theme, Branding
-│   └── lib/api.js           # axios instance + PRODUCT_STATUSES + STATUS_COLORS
+│   ├── components/Layout.jsx (sidebar: Status, Balance, Customers …)
+│   └── lib/api.js
 └── memory/PRD.md
 ```
 
-## Key API Endpoints
+## Key API Endpoints (Iteration 3 additions in **bold**)
 - `GET /api/branding`
-- `GET /api/customers` — returns `total_balance`, `total_orders`, `total_business`
-- `GET /api/orders/balance/list` — outstanding orders, sorted by balance desc
-- `PATCH /api/orders/{order_id}/products/{product_id}` — `{ status }`
-- `POST /api/reminders/dismiss` / `/api/reminders/restore`
-- `GET /api/backup` — admin-only, `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
+- `GET /api/customers` — returns `total_balance`
+- `GET /api/orders/balance/list`
+- `PATCH /api/orders/{id}/products/{id}` — also schedules Drive sync
+- `POST /api/reminders/dismiss` / `restore`
+- `GET /api/backup` — full Excel
+- **`GET /api/backup/summary`** — compact order summary Excel
+- **`GET /api/gdrive/status`** — current connection status
+- **`POST /api/gdrive/connect`** — `{service_account_json, folder_id, auto_sync}`
+- **`POST /api/gdrive/sync`** — force sync now
+- **`PATCH /api/gdrive/auto-sync`** — toggle
+- **`DELETE /api/gdrive/disconnect`**
 
-## Testing Status (Iteration 3)
-- Backend pytest: **9/9 passed** (`/app/backend/tests/backend_test.py`).
-- Frontend Playwright flow: **100%** — login, sidebar order, customers balance, /balance page (search + row click), inline status dropdown w/ toast + row removal, xlsx download.
+## MongoDB Collections
+- `customers`, `orders`, `users`, `settings`, `reminder_state`
+- **`gdrive_config`** (new): `{id:'default', service_account_json, folder_id, folder_name, spreadsheet_id, auto_sync, last_sync_at, last_sync_status, last_sync_error}`
 
-## Backlog / Future Enhancements (P1/P2)
-- P2: Replace duplicate `@app.get('/backup')` / `@app.get('/stats')` with single `@api.*` registration (currently dead code on the non-/api path).
-- P2: Convert customer balance aggregation to a Mongo `$group` pipeline as order volume grows.
-- P2: Server-side pagination / filtering for `Orders`, `Balance`, and `StatusQueue` once dataset crosses ~2000.
-- P1: WhatsApp / SMS reminders for balance-due customers.
-- P1: Customer ledger PDF export (alongside invoice).
+## Pending / Backlog (P1/P2)
+- P1: **Old MongoDB → New MongoDB data migration guide** (3 options documented in chat: same DB reuse / Compass copy / Import Backup feature). Implementation of an in-app "Import Data" feature pending.
+- P1: Vercel deployment fixes — `.npmrc` (`legacy-peer-deps=true`) committed; if build still fails, set `CI=false` env on Vercel and switch install command to `yarn install`.
+- P1: WhatsApp / SMS reminder for balance-due customers.
+- P2: Mongo `$group` aggregation for customer balances at scale (>2000 orders).
+- P2: Cleanup duplicate `@app.get('/backup')` / `@app.get('/stats')` dead routes.
+- P2: E2E test of Google Drive sync against a real service account (currently only API endpoints unit-verified).
+
+## Deployment
+- Frontend → Vercel (Root Directory = `frontend`, `.npmrc` w/ legacy-peer-deps).
+- Backend → Render (Python web service). Env: `MONGO_URL`, `DB_NAME`, `JWT_SECRET`.
+- Data migration: easiest is to point new Render `MONGO_URL` at the old Atlas DB — same schema, auto-status-migration runs on startup.
 
 ## Credentials
 See `/app/memory/test_credentials.md` — `admin / admin123`.

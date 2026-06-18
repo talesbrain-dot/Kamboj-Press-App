@@ -19,7 +19,7 @@ export default function Layout() {
   const navItems = [
     { to: '/', label: 'Dashboard', icon: LayoutDashboard, show: true },
     { to: '/orders/new', label: 'New Order', icon: ShoppingCart, show: true },
-    { to: '/queue/Digital%20Printing', label: 'Digital Printing', icon: Printer, show: true },
+    { to: '/queue/Offset', label: 'Status', icon: Printer, show: true },
     { to: '/reminders', label: 'Reminders', icon: Bell, show: isAdmin },
     { to: '/balance', label: 'Balance', icon: Wallet, show: isAdmin },
     { to: '/customers', label: 'Customers', icon: Users, show: isAdmin },

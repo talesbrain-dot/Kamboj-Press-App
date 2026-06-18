@@ -9,7 +9,7 @@ import { useToast } from '../hooks/use-toast';
 
 export default function StatusQueue() {
   const { status: paramStatus } = useParams();
-  const initial = paramStatus && PRODUCT_STATUSES.includes(paramStatus) ? paramStatus : 'Pending';
+  const initial = paramStatus && PRODUCT_STATUSES.includes(paramStatus) ? paramStatus : 'Offset';
   const { toast } = useToast();
   const [status, setStatus] = useState(initial);
   const [orders, setOrders] = useState([]);
