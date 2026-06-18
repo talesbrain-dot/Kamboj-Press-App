@@ -198,17 +198,10 @@ test_plan:
 agent_communication:
   - agent: "main"
     message: |
-      Implemented fixes for the 4 reported bugs.
-
-      Auth for testing: POST /api/auth/login with {"username":"admin","password":"admin123"} → use returned access_token as Bearer.
-
-      Please verify:
-      1. GET /api/backup with admin Bearer returns 200 with keys users/customers/orders/settings and that user objects do NOT contain password_hash.
-      2. GET /api/branding (no auth) returns 200 with keys {app_name, company_name, logo_base64}.
-      3. After PATCH /api/settings with {"app_name":"Kamboj Test","logo_base64":"data:image/png;base64,AAAA"}, calling GET /api/branding reflects the new app_name and logo_base64.
-      4. POST /api/reminders/dismiss with body {"key":"test-key-1"} returns 200 {ok:true} and the settings dismissed_reminders list contains "test-key-1". Then POST /api/reminders/restore with same body and verify it's removed.
-      5. GET /api/orders/statuses/list (or whichever endpoint exposes statuses) returns the new ordered list including "Screen Printing", "Binding", "Flex" and does NOT include "Cutting" or "Packing". If no such endpoint exists, instead create an order with a product having status "Binding" and confirm it persists.
-      6. Confirm any pre-existing order products with status "Cutting"/"Packing" got migrated (you can insert one manually then restart, or trust the startup log).
+      Implemented fixes for the 4 reported bugs. See checklist above.
+  - agent: "testing"
+    message: |
+      All 19/19 backend tests passed (100%). Backup, branding, reminders dismiss/restore via /api prefix, and the new order statuses (Binding/Flex/Screen Printing) all working. Password hashes are correctly redacted in /api/backup. Settings round-trip (PATCH → GET /api/branding) reflects new app_name and logo_base64 properly. No regressions in auth/orders/customers/stats. Old "Cutting" status correctly rejected (400).
   
   - agent: "testing"
     message: |
