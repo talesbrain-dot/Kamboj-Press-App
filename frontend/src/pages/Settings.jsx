@@ -203,15 +203,22 @@ export default function Settings() {
     }
   };
 
+  const [gdriveConfirmDisconnect, setGdriveConfirmDisconnect] = useState(false);
+
   const disconnectGdrive = async () => {
-    if (!window.confirm('Disconnect Google Drive? App sync band kar dega.')) return;
+    if (!gdriveConfirmDisconnect) {
+      setGdriveConfirmDisconnect(true);
+      setTimeout(() => setGdriveConfirmDisconnect(false), 4000);
+      return;
+    }
+    setGdriveConfirmDisconnect(false);
     setGdriveLoading(true);
     try {
       const r = await api.delete('/gdrive/disconnect');
       // Force fresh status from server so the UI reflects backend truth.
       setGdrive(r.data || { connected: false, has_config: false });
       await loadGdrive();
-      toast({ title: 'Disconnected' });
+      toast({ title: 'Disconnected', description: 'Ab naya sheet connect kar sakte ho.' });
     } catch (e) {
       console.error('disconnect error', e);
       toast({
