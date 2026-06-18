@@ -62,18 +62,28 @@ export default function Settings() {
 
   const exportBackup = async () => {
     try {
-      const r = await api.get('/backup');
-      const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      const blob = new Blob([JSON.stringify(r.data, null, 2)], { type: 'application/json' });
+      const r = await api.get('/backup', { responseType: 'blob' });
+      let filename = 'press-order-book-backup.xlsx';
+      const cd = r.headers?.['content-disposition'] || r.headers?.['Content-Disposition'];
+      if (cd) {
+        const m = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(cd);
+        if (m && m[1]) filename = decodeURIComponent(m[1]);
+      } else {
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        filename = `press-order-book-backup-${stamp}.xlsx`;
+      }
+      const blob = new Blob([r.data], {
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `press-order-book-backup-${stamp}.json`;
+      a.download = filename;
       document.body.appendChild(a);
       a.click();
       a.remove();
       URL.revokeObjectURL(url);
-      toast({ title: 'Backup downloaded', description: `${r.data._counts?.orders || 0} orders, ${r.data._counts?.customers || 0} customers` });
+      toast({ title: 'Backup downloaded', description: 'Excel file saved to your device.' });
     } catch (e) {
       toast({ title: 'Backup failed', variant: 'destructive' });
     }
@@ -156,9 +166,9 @@ export default function Settings() {
 
       <Card className="p-5 space-y-3">
         <h2 className="font-medium">Data Backup</h2>
-        <p className="text-sm text-slate-500 dark:text-slate-400">Download a full JSON snapshot of all users, customers, orders and settings. Passwords are redacted.</p>
-        <Button type="button" variant="outline" onClick={exportBackup}>
-          <Download className="w-4 h-4 mr-2" />Export Backup (JSON)
+        <p className="text-sm text-slate-500 dark:text-slate-400">Download a full Excel (.xlsx) snapshot with separate sheets for orders, products, payments, customers and outstanding balances.</p>
+        <Button type="button" variant="outline" onClick={exportBackup} data-testid="export-backup-btn">
+          <Download className="w-4 h-4 mr-2" />Export Backup (Excel)
         </Button>
       </Card>
 

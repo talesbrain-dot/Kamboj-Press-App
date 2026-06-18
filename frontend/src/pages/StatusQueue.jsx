@@ -3,17 +3,25 @@ import { Link, useParams } from 'react-router-dom';
 import api, { formatINR, formatDate, STATUS_COLORS, PRODUCT_STATUSES } from '../lib/api';
 import { Card } from '../components/ui/card';
 import { Input } from '../components/ui/input';
-import { Badge } from '../components/ui/badge';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
-import { Search, Printer, Phone, Package } from 'lucide-react';
+import { Search, Printer, Phone, Package, Loader2 } from 'lucide-react';
+import { useToast } from '../hooks/use-toast';
 
 export default function StatusQueue() {
   const { status: paramStatus } = useParams();
   const initial = paramStatus && PRODUCT_STATUSES.includes(paramStatus) ? paramStatus : 'Pending';
+  const { toast } = useToast();
   const [status, setStatus] = useState(initial);
   const [orders, setOrders] = useState([]);
   const [q, setQ] = useState('');
   const [loading, setLoading] = useState(true);
+  const [updatingKey, setUpdatingKey] = useState(null);
+
+  useEffect(() => {
+    if (paramStatus && PRODUCT_STATUSES.includes(paramStatus)) {
+      setStatus(paramStatus);
+    }
+  }, [paramStatus]);
 
   useEffect(() => {
     (async () => {
@@ -35,6 +43,7 @@ export default function StatusQueue() {
             key: `${o.id}-${p.id}`,
             order_id: o.id,
             order_no: o.order_no,
+            product_id: p.id,
             customer_name: o.customer_name,
             customer_phone: o.customer_phone,
             product: p,
@@ -61,6 +70,25 @@ export default function StatusQueue() {
     );
   }, [rows, q]);
 
+  const changeStatus = async (row, newStatus) => {
+    if (!newStatus || newStatus === row.product.status) return;
+    setUpdatingKey(row.key);
+    try {
+      const r = await api.patch(`/orders/${row.order_id}/products/${row.product_id}`, { status: newStatus });
+      const updatedOrder = r.data;
+      setOrders((prev) => prev.map((o) => (o.id === updatedOrder.id ? updatedOrder : o)));
+      toast({ title: 'Status updated', description: `${row.product.name} → ${newStatus}` });
+    } catch (e) {
+      toast({
+        title: 'Update failed',
+        description: e?.response?.data?.detail || 'Try again',
+        variant: 'destructive',
+      });
+    } finally {
+      setUpdatingKey(null);
+    }
+  };
+
   return (
     <div className="space-y-5 max-w-5xl">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
@@ -74,7 +102,7 @@ export default function StatusQueue() {
         </div>
         <div className="flex gap-2 items-center">
           <Select value={status} onValueChange={setStatus}>
-            <SelectTrigger className="w-40"><SelectValue /></SelectTrigger>
+            <SelectTrigger className="w-40" data-testid="queue-status-filter"><SelectValue /></SelectTrigger>
             <SelectContent>
               {PRODUCT_STATUSES.map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
             </SelectContent>
@@ -100,30 +128,45 @@ export default function StatusQueue() {
         ) : (
           <div className="divide-y divide-slate-200 dark:divide-slate-800">
             {filtered.map((r) => (
-              <Link to={`/orders/${r.order_id}`} key={r.key} className="block p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <span className="font-medium">{r.product.name}</span>
-                      <Badge className={`${STATUS_COLORS[r.product.status] || ''} border-0`}>{r.product.status}</Badge>
-                    </div>
+              <div key={r.key} className="p-4 hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <Link to={`/orders/${r.order_id}`} className="flex-1 min-w-0">
+                    <div className="font-medium">{r.product.name}</div>
                     <div className="text-sm text-slate-600 dark:text-slate-300 mt-1">
                       Qty: {r.product.quantity} • Price: {formatINR(r.product.price)}
                     </div>
                     {r.product.notes && <div className="text-xs text-slate-500 mt-0.5 italic">{r.product.notes}</div>}
-                  </div>
-                  <div className="sm:text-right space-y-0.5">
+                  </Link>
+                  <div className="sm:text-right space-y-1 sm:min-w-[220px]">
                     <div className="text-sm">
-                      <span className="font-medium text-orange-600 dark:text-orange-400">{r.order_no}</span>
+                      <Link to={`/orders/${r.order_id}`} className="font-medium text-orange-600 dark:text-orange-400 hover:underline">{r.order_no}</Link>
                       <span className="text-slate-500"> • {r.customer_name}</span>
                     </div>
                     <div className="text-xs text-slate-500 flex sm:justify-end items-center gap-1">
                       <Phone className="w-3 h-3" />{r.customer_phone}
                     </div>
+                    <div className="flex sm:justify-end items-center gap-2 pt-1">
+                      {updatingKey === r.key && <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-400" />}
+                      <Select
+                        value={r.product.status}
+                        onValueChange={(v) => changeStatus(r, v)}
+                        disabled={updatingKey === r.key}
+                      >
+                        <SelectTrigger
+                          className={`h-8 w-40 text-xs border-0 ${STATUS_COLORS[r.product.status] || ''}`}
+                          data-testid={`inline-status-${r.product_id}`}
+                        >
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {PRODUCT_STATUSES.map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
                     <div className="text-xs text-slate-400">{formatDate(r.updated_at)}</div>
                   </div>
                 </div>
-              </Link>
+              </div>
             ))}
           </div>
         )}

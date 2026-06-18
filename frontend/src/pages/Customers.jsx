@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import api, { formatDate } from '../lib/api';
+import api, { formatDate, formatINR } from '../lib/api';
 import { Card } from '../components/ui/card';
 import { Input } from '../components/ui/input';
 import { Button } from '../components/ui/button';
@@ -72,6 +72,19 @@ export default function Customers() {
                   </div>
                 </Link>
                 <div className="flex items-center gap-3 shrink-0">
+                  <div className="text-right">
+                    <div
+                      className={`text-sm font-semibold ${
+                        (c.total_balance || 0) > 0
+                          ? 'text-rose-600 dark:text-rose-400'
+                          : 'text-emerald-600 dark:text-emerald-400'
+                      }`}
+                      data-testid={`customer-balance-${c.id}`}
+                    >
+                      {formatINR(c.total_balance || 0)}
+                    </div>
+                    <div className="text-[10px] uppercase tracking-wide text-slate-400">Balance</div>
+                  </div>
                   <div className="text-xs text-slate-500 hidden sm:block">{formatDate(c.updated_at)}</div>
                   <Button
                     variant="ghost"
@@ -79,6 +92,7 @@ export default function Customers() {
                     onClick={(e) => remove(e, c)}
                     disabled={deletingId === c.id}
                     title="Delete customer"
+                    data-testid={`delete-customer-${c.id}`}
                   >
                     <Trash2 className="w-4 h-4 text-rose-500" />
                   </Button>

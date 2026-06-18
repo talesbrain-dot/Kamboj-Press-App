@@ -18,6 +18,7 @@ import Settings from './pages/Settings';
 import Reminders from './pages/Reminders';
 import EditOrder from './pages/EditOrder';
 import StatusQueue from './pages/StatusQueue';
+import Balance from './pages/Balance';
 
 function Protected({ children, adminOnly = false }) {
   const { user, loading } = useAuth();
@@ -46,6 +47,7 @@ function App() {
               <Route path="/reminders" element={<Protected adminOnly><Reminders /></Protected>} />
               <Route path="/queue" element={<StatusQueue />} />
               <Route path="/queue/:status" element={<StatusQueue />} />
+              <Route path="/balance" element={<Protected adminOnly><Balance /></Protected>} />
               <Route path="/users" element={<Protected adminOnly><Users /></Protected>} />
               <Route path="/settings" element={<Protected adminOnly><Settings /></Protected>} />
             </Route>

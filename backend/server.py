@@ -1,9 +1,11 @@
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, status, Request
+from fastapi.responses import StreamingResponse
 from fastapi.security import OAuth2PasswordBearer
 from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 import os
+import io
 import logging
 from pathlib import Path
 from pydantic import BaseModel, Field
@@ -14,6 +16,8 @@ import jwt
 from passlib.context import CryptContext
 
 from pymongo import ReturnDocument
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Alignment
 
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
@@ -224,7 +228,31 @@ async def list_customers(q: Optional[str] = None, user=Depends(get_current_user)
             {"phone": {"$regex": q, "$options": "i"}},
         ]}
     customers = await db.customers.find(query).sort("updated_at", -1).to_list(500)
-    return [normalize_dates(clean_doc(c)) for c in customers]
+
+    # Aggregate balance + order count per customer in a single pass.
+    customer_ids = [c.get("id") for c in customers if c.get("id")]
+    balance_map = {cid: {"total_balance": 0.0, "total_orders": 0, "total_business": 0.0} for cid in customer_ids}
+    if customer_ids:
+        async for o in db.orders.find({"customer_id": {"$in": customer_ids}}):
+            cid = o.get("customer_id")
+            if cid not in balance_map:
+                continue
+            total = sum((p.get("price", 0) or 0) for p in o.get("products", []))
+            paid = (o.get("advance_paid", 0) or 0) + sum(p.get("amount", 0) for p in o.get("payments", []))
+            balance = max(total - paid, 0)
+            balance_map[cid]["total_balance"] += balance
+            balance_map[cid]["total_business"] += total
+            balance_map[cid]["total_orders"] += 1
+
+    out = []
+    for c in customers:
+        d = normalize_dates(clean_doc(c))
+        info = balance_map.get(d.get("id"), {"total_balance": 0.0, "total_orders": 0, "total_business": 0.0})
+        d["total_balance"] = round(info["total_balance"], 2)
+        d["total_business"] = round(info["total_business"], 2)
+        d["total_orders"] = info["total_orders"]
+        out.append(d)
+    return out
 
 @api.get("/customers/{customer_id}")
 async def get_customer(customer_id: str, user=Depends(get_current_user)):
@@ -317,6 +345,16 @@ async def create_order(data: OrderCreate, user=Depends(get_current_user)):
 async def list_orders(user=Depends(get_current_user)):
     orders = await db.orders.find().sort("created_at", -1).to_list(1000)
     return [serialize_order(o) for o in orders]
+
+@api.get("/orders/balance/list")
+async def list_balance_orders(user=Depends(get_current_user)):
+    """Return only orders that still have an outstanding balance > 0,
+    sorted by most outstanding first."""
+    orders = await db.orders.find().sort("created_at", -1).to_list(2000)
+    serialized = [serialize_order(o) for o in orders]
+    pending = [o for o in serialized if (o.get("balance") or 0) > 0]
+    pending.sort(key=lambda x: x.get("balance", 0), reverse=True)
+    return pending
 
 @api.get("/orders/{order_id}")
 async def get_order(order_id: str, user=Depends(get_current_user)):
@@ -547,39 +585,270 @@ async def get_branding():
         "logo_base64": s.get("logo_base64") or "",
     }
 
-# ---------- Backup ----------
+# ---------- Backup (Excel) ----------
+def _fmt_dt(val):
+    if not val:
+        return ""
+    if isinstance(val, datetime):
+        return val.strftime("%Y-%m-%d %H:%M:%S")
+    return str(val)
+
+
+def _style_header(ws, num_cols):
+    header_font = Font(bold=True, color="FFFFFF")
+    fill = PatternFill("solid", fgColor="F97316")  # orange-500
+    align = Alignment(horizontal="left", vertical="center")
+    for col_idx in range(1, num_cols + 1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.font = header_font
+        cell.fill = fill
+        cell.alignment = align
+    ws.freeze_panes = "A2"
+
+
+def _autosize(ws):
+    for col in ws.columns:
+        try:
+            letter = col[0].column_letter
+        except AttributeError:
+            continue
+        max_len = 0
+        for cell in col:
+            v = cell.value
+            if v is None:
+                continue
+            length = len(str(v))
+            if length > max_len:
+                max_len = length
+        ws.column_dimensions[letter].width = min(max(max_len + 2, 12), 50)
+
+
+async def _build_backup_workbook() -> bytes:
+    users = await db.users.find().to_list(10000)
+    customers = await db.customers.find().to_list(10000)
+    orders = await db.orders.find().sort("created_at", -1).to_list(100000)
+    settings_doc = await db.settings.find_one({"id": "default"}) or {}
+
+    customer_map = {c.get("id"): c for c in customers}
+
+    wb = Workbook()
+
+    # Sheet 1 - Summary
+    ws = wb.active
+    ws.title = "Summary"
+    ws.append(["Field", "Value"])
+    ws.append(["App Name", settings_doc.get("app_name") or "Press Order Book"])
+    ws.append(["Company Name", settings_doc.get("company_name") or ""])
+    ws.append(["Company Phone", settings_doc.get("company_phone") or ""])
+    ws.append(["Company Address", settings_doc.get("company_address") or ""])
+    ws.append(["Exported At", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")])
+    ws.append(["Total Users", len(users)])
+    ws.append(["Total Customers", len(customers)])
+    ws.append(["Total Orders", len(orders)])
+    total_revenue = 0.0
+    total_paid_all = 0.0
+    total_balance_all = 0.0
+    for o in orders:
+        t = sum((p.get("price", 0) or 0) for p in o.get("products", []))
+        pd = (o.get("advance_paid", 0) or 0) + sum(p.get("amount", 0) for p in o.get("payments", []))
+        total_revenue += t
+        total_paid_all += pd
+        total_balance_all += max(t - pd, 0)
+    ws.append(["Total Order Value (INR)", round(total_revenue, 2)])
+    ws.append(["Total Paid (INR)", round(total_paid_all, 2)])
+    ws.append(["Total Outstanding Balance (INR)", round(total_balance_all, 2)])
+    _style_header(ws, 2)
+    _autosize(ws)
+
+    # Sheet 2 - Orders (one row per order)
+    ws = wb.create_sheet("Orders")
+    headers = [
+        "Order No", "Date Created", "Last Updated", "Customer Name", "Customer Phone", "Customer Address",
+        "Products Count", "Products (name x qty @ price [status])",
+        "Total (INR)", "Advance Paid (INR)", "Other Payments (INR)", "Paid (INR)", "Balance (INR)",
+        "Created By", "Assigned User IDs", "Order Notes",
+    ]
+    ws.append(headers)
+    for o in orders:
+        prods = o.get("products", [])
+        total = sum((p.get("price", 0) or 0) for p in prods)
+        advance = o.get("advance_paid", 0) or 0
+        other_pmts = sum(p.get("amount", 0) for p in o.get("payments", []))
+        paid = advance + other_pmts
+        balance = max(total - paid, 0)
+        product_str = "; ".join(
+            f"{p.get('name','')} x{p.get('quantity',0)} @ {p.get('price',0)} [{p.get('status','')}]"
+            for p in prods
+        )
+        ws.append([
+            o.get("order_no", ""),
+            _fmt_dt(o.get("created_at")),
+            _fmt_dt(o.get("updated_at")),
+            o.get("customer_name", ""),
+            o.get("customer_phone", ""),
+            o.get("customer_address", ""),
+            len(prods),
+            product_str,
+            round(total, 2),
+            round(advance, 2),
+            round(other_pmts, 2),
+            round(paid, 2),
+            round(balance, 2),
+            o.get("created_by_name", ""),
+            ", ".join(o.get("assigned_user_ids", []) or []),
+            o.get("notes", ""),
+        ])
+    _style_header(ws, len(headers))
+    _autosize(ws)
+
+    # Sheet 3 - Order Products (one row per product line item)
+    ws = wb.create_sheet("Order Products")
+    headers = [
+        "Order No", "Order Date", "Customer Name", "Customer Phone",
+        "Product Name", "Quantity", "Price (INR)", "Status", "Product Notes", "Product Updated At",
+    ]
+    ws.append(headers)
+    for o in orders:
+        for p in o.get("products", []):
+            ws.append([
+                o.get("order_no", ""),
+                _fmt_dt(o.get("created_at")),
+                o.get("customer_name", ""),
+                o.get("customer_phone", ""),
+                p.get("name", ""),
+                p.get("quantity", 0),
+                round(p.get("price", 0) or 0, 2),
+                p.get("status", ""),
+                p.get("notes", ""),
+                _fmt_dt(p.get("updated_at")),
+            ])
+    _style_header(ws, len(headers))
+    _autosize(ws)
+
+    # Sheet 4 - Payments
+    ws = wb.create_sheet("Payments")
+    headers = ["Order No", "Customer Name", "Type", "Amount (INR)", "Date", "Recorded By", "Note"]
+    ws.append(headers)
+    for o in orders:
+        if (o.get("advance_paid") or 0) > 0:
+            ws.append([
+                o.get("order_no", ""),
+                o.get("customer_name", ""),
+                "Advance",
+                round(o.get("advance_paid", 0) or 0, 2),
+                _fmt_dt(o.get("created_at")),
+                o.get("created_by_name", ""),
+                "Initial advance at order creation",
+            ])
+        for pmt in o.get("payments", []):
+            ws.append([
+                o.get("order_no", ""),
+                o.get("customer_name", ""),
+                "Payment",
+                round(pmt.get("amount", 0) or 0, 2),
+                _fmt_dt(pmt.get("at")),
+                pmt.get("by", ""),
+                pmt.get("note", ""),
+            ])
+    _style_header(ws, len(headers))
+    _autosize(ws)
+
+    # Sheet 5 - Customers (with balance)
+    ws = wb.create_sheet("Customers")
+    headers = ["Name", "Phone", "Address", "Orders", "Total Business (INR)", "Total Paid (INR)", "Outstanding Balance (INR)", "Created At", "Last Updated"]
+    ws.append(headers)
+    # Compute per-customer aggregates
+    per_cust = {}
+    for o in orders:
+        cid = o.get("customer_id")
+        if not cid:
+            continue
+        t = sum((p.get("price", 0) or 0) for p in o.get("products", []))
+        pd = (o.get("advance_paid", 0) or 0) + sum(p.get("amount", 0) for p in o.get("payments", []))
+        b = max(t - pd, 0)
+        agg = per_cust.setdefault(cid, {"orders": 0, "biz": 0.0, "paid": 0.0, "bal": 0.0})
+        agg["orders"] += 1
+        agg["biz"] += t
+        agg["paid"] += pd
+        agg["bal"] += b
+    for c in customers:
+        cid = c.get("id")
+        agg = per_cust.get(cid, {"orders": 0, "biz": 0.0, "paid": 0.0, "bal": 0.0})
+        ws.append([
+            c.get("name", ""),
+            c.get("phone", ""),
+            c.get("address", ""),
+            agg["orders"],
+            round(agg["biz"], 2),
+            round(agg["paid"], 2),
+            round(agg["bal"], 2),
+            _fmt_dt(c.get("created_at")),
+            _fmt_dt(c.get("updated_at")),
+        ])
+    _style_header(ws, len(headers))
+    _autosize(ws)
+
+    # Sheet 6 - Outstanding Balance (orders with balance > 0)
+    ws = wb.create_sheet("Outstanding Balance")
+    headers = ["Order No", "Date", "Customer Name", "Customer Phone", "Total (INR)", "Paid (INR)", "Balance (INR)", "Days Old"]
+    ws.append(headers)
+    now = datetime.now(timezone.utc)
+    pending_rows = []
+    for o in orders:
+        t = sum((p.get("price", 0) or 0) for p in o.get("products", []))
+        pd = (o.get("advance_paid", 0) or 0) + sum(p.get("amount", 0) for p in o.get("payments", []))
+        b = max(t - pd, 0)
+        if b <= 0:
+            continue
+        created = o.get("created_at")
+        days_old = ""
+        if isinstance(created, datetime):
+            try:
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                days_old = (now - created).days
+            except Exception:
+                days_old = ""
+        pending_rows.append([
+            o.get("order_no", ""), _fmt_dt(o.get("created_at")),
+            o.get("customer_name", ""), o.get("customer_phone", ""),
+            round(t, 2), round(pd, 2), round(b, 2), days_old,
+        ])
+    pending_rows.sort(key=lambda r: r[6], reverse=True)  # highest balance first
+    for r in pending_rows:
+        ws.append(r)
+    _style_header(ws, len(headers))
+    _autosize(ws)
+
+    # Sheet 7 - Users
+    ws = wb.create_sheet("Users")
+    headers = ["Username", "Name", "Role", "Created At"]
+    ws.append(headers)
+    for u in users:
+        ws.append([u.get("username", ""), u.get("name", ""), u.get("role", ""), _fmt_dt(u.get("created_at"))])
+    _style_header(ws, len(headers))
+    _autosize(ws)
+
+    out = io.BytesIO()
+    wb.save(out)
+    out.seek(0)
+    return out.getvalue()
+
+
 @app.get("/backup")
 @api.get("/backup")
 async def export_backup(admin=Depends(require_admin)):
-    users = await db.users.find().to_list(10000)
-    customers = await db.customers.find().to_list(10000)
-    orders = await db.orders.find().to_list(100000)
-    settings_doc = await db.settings.find_one({"id": "default"}) or {}
-
-    # Redact password hashes
-    safe_users = []
-    for u in users:
-        u = clean_doc(dict(u))
-        u.pop("password_hash", None)
-        safe_users.append(normalize_dates(u))
-
-    safe_customers = [normalize_dates(clean_doc(dict(c))) for c in customers]
-    safe_orders = [normalize_dates(clean_doc(dict(o))) for o in orders]
-    safe_settings = normalize_dates(clean_doc(dict(settings_doc)))
-
-    return {
-        "exported_at": datetime.now(timezone.utc).isoformat(),
-        "version": 1,
-        "_counts": {
-            "users": len(safe_users),
-            "customers": len(safe_customers),
-            "orders": len(safe_orders),
+    data = await _build_backup_workbook()
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"press-order-book-backup-{stamp}.xlsx"
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Access-Control-Expose-Headers": "Content-Disposition",
         },
-        "users": safe_users,
-        "customers": safe_customers,
-        "orders": safe_orders,
-        "settings": safe_settings,
-    }
+    )
 
 # ---------- Stats ----------
 @app.get("/stats")
