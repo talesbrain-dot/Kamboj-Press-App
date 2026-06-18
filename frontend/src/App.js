@@ -1,55 +1,61 @@
-import { useEffect } from "react";
-import "@/App.css";
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import axios from "axios";
-import { HOME } from "@/constants/testIds";
+import React from 'react';
+import './App.css';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { ThemeProvider } from './context/ThemeContext';
+import { BrandingProvider } from './context/BrandingContext';
+import { Toaster } from './components/ui/toaster';
+import Layout from './components/Layout';
+import Login from './pages/Login';
+import Dashboard from './pages/Dashboard';
+import NewOrder from './pages/NewOrder';
+import OrderDetail from './pages/OrderDetail';
+import Invoice from './pages/Invoice';
+import Customers from './pages/Customers';
+import CustomerDetail from './pages/CustomerDetail';
+import Users from './pages/Users';
+import Settings from './pages/Settings';
+import Reminders from './pages/Reminders';
+import EditOrder from './pages/EditOrder';
+import StatusQueue from './pages/StatusQueue';
 
-const BACKEND_URL = process.env.REACT_APP_BACKEND_URL;
-const API = `${BACKEND_URL}/api`;
-
-const Home = () => {
-  const helloWorldApi = async () => {
-    try {
-      const response = await axios.get(`${API}/`);
-      console.log(response.data.message);
-    } catch (e) {
-      console.error(e, `errored out requesting / api`);
-    }
-  };
-
-  useEffect(() => {
-    helloWorldApi();
-  }, []);
-
-  return (
-    <div>
-      <header className="App-header">
-        <a
-          data-testid={HOME.emergentLink}
-          className="App-link"
-          href="https://emergent.sh"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <img src="https://avatars.githubusercontent.com/in/1201222?s=120&u=2686cf91179bbafbc7a71bfbc43004cf9ae1acea&v=4" />
-        </a>
-        <p className="mt-5">Building something incredible ~!</p>
-      </header>
-    </div>
-  );
-};
+function Protected({ children, adminOnly = false }) {
+  const { user, loading } = useAuth();
+  if (loading) return <div className="min-h-screen flex items-center justify-center text-slate-500">Loading...</div>;
+  if (!user) return <Navigate to="/login" replace />;
+  if (adminOnly && user.role !== 'admin') return <Navigate to="/" replace />;
+  return children;
+}
 
 function App() {
   return (
-    <div className="App">
-      <BrowserRouter>
-        <Routes>
-          <Route path="/" element={<Home />}>
-            <Route index element={<Home />} />
-          </Route>
-        </Routes>
-      </BrowserRouter>
-    </div>
+    <ThemeProvider>
+      <BrandingProvider>
+        <AuthProvider>
+          <BrowserRouter>
+          <Routes>
+            <Route path="/login" element={<Login />} />
+            <Route element={<Protected><Layout /></Protected>}>
+              <Route path="/" element={<Dashboard />} />
+              <Route path="/orders/new" element={<NewOrder />} />
+              <Route path="/orders/:id" element={<OrderDetail />} />
+              <Route path="/orders/:id/edit" element={<Protected adminOnly><EditOrder /></Protected>} />
+              <Route path="/orders/:id/invoice" element={<Invoice />} />
+              <Route path="/customers" element={<Protected adminOnly><Customers /></Protected>} />
+              <Route path="/customers/:id" element={<Protected adminOnly><CustomerDetail /></Protected>} />
+              <Route path="/reminders" element={<Protected adminOnly><Reminders /></Protected>} />
+              <Route path="/queue" element={<StatusQueue />} />
+              <Route path="/queue/:status" element={<StatusQueue />} />
+              <Route path="/users" element={<Protected adminOnly><Users /></Protected>} />
+              <Route path="/settings" element={<Protected adminOnly><Settings /></Protected>} />
+            </Route>
+            <Route path="*" element={<Navigate to="/" replace />} />
+          </Routes>
+        </BrowserRouter>
+        <Toaster />
+        </AuthProvider>
+      </BrandingProvider>
+    </ThemeProvider>
   );
 }
 
