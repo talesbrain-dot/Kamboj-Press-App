@@ -1009,12 +1009,11 @@ def _public_gdrive_status(cfg: Optional[dict]) -> dict:
         return {"connected": False}
     sa = cfg.get("service_account_json") or {}
     return {
-        "connected": bool(cfg.get("service_account_json") and cfg.get("folder_id")),
+        "connected": bool(cfg.get("service_account_json") and cfg.get("spreadsheet_id")),
         "auto_sync": bool(cfg.get("auto_sync", True)),
-        "folder_id": cfg.get("folder_id"),
-        "folder_name": cfg.get("folder_name"),
         "service_account_email": sa.get("client_email"),
         "spreadsheet_id": cfg.get("spreadsheet_id"),
+        "spreadsheet_name": cfg.get("spreadsheet_name"),
         "spreadsheet_url": gdrive.sheet_url(cfg["spreadsheet_id"]) if cfg.get("spreadsheet_id") else None,
         "last_sync_at": cfg.get("last_sync_at"),
         "last_sync_status": cfg.get("last_sync_status"),
@@ -1024,16 +1023,14 @@ def _public_gdrive_status(cfg: Optional[dict]) -> dict:
 
 async def _do_gdrive_sync() -> dict:
     cfg = await _load_gdrive_config()
-    if not cfg or not cfg.get("service_account_json") or not cfg.get("folder_id"):
+    if not cfg or not cfg.get("service_account_json") or not cfg.get("spreadsheet_id"):
         raise GDriveNotConfigured("Google Drive abhi tak connect nahi hua hai.")
     sa_info = cfg["service_account_json"]
-    folder_id = cfg["folder_id"]
-    title = cfg.get("sheet_title") or "Kamboj Press - Order Summary"
+    sheet_id = cfg["spreadsheet_id"]
     rows = await _order_summary_rows(include_serial=True)
     try:
-        sheet_id = await asyncio.to_thread(
-            gdrive.ensure_spreadsheet, sa_info, folder_id, cfg.get("spreadsheet_id"), title
-        )
+        # Make sure SA still has edit access; raises if not.
+        sheet_id = await asyncio.to_thread(gdrive.ensure_spreadsheet, sa_info, sheet_id)
         result = await asyncio.to_thread(gdrive.write_rows, sa_info, sheet_id, rows)
     except gdrive.GDriveError as e:
         await _save_gdrive_config({
@@ -1043,7 +1040,6 @@ async def _do_gdrive_sync() -> dict:
         })
         raise
     await _save_gdrive_config({
-        "spreadsheet_id": sheet_id,
         "last_sync_status": "ok",
         "last_sync_error": None,
         "last_sync_at": datetime.now(timezone.utc).isoformat(),
@@ -1086,7 +1082,7 @@ def schedule_gdrive_sync() -> None:
         cfg = await _load_gdrive_config()
         if not cfg or not cfg.get("auto_sync", True):
             return
-        if not cfg.get("service_account_json") or not cfg.get("folder_id"):
+        if not cfg.get("service_account_json") or not cfg.get("spreadsheet_id"):
             return
         await _debounced_sync()
 
@@ -1097,7 +1093,7 @@ def schedule_gdrive_sync() -> None:
 
 class GDriveConnectIn(BaseModel):
     service_account_json: dict
-    folder_id: str
+    spreadsheet: str  # URL or ID of an existing Google Sheet (user-created + shared with SA)
     auto_sync: bool = True
 
 
@@ -1112,17 +1108,19 @@ async def gdrive_connect(data: GDriveConnectIn, admin=Depends(require_admin)):
     sa = data.service_account_json
     if not isinstance(sa, dict) or sa.get("type") != "service_account" or not sa.get("client_email"):
         raise HTTPException(400, "Yeh service-account JSON valid nahi lag rahi. Google Cloud Console se naya key download karein.")
-    folder_id = (data.folder_id or "").strip()
-    if not folder_id:
-        raise HTTPException(400, "Drive folder ID zaruri hai.")
+    spreadsheet_id = gdrive.parse_spreadsheet_id(data.spreadsheet)
+    if not spreadsheet_id:
+        raise HTTPException(400, "Google Sheet URL ya ID zaruri hai.")
     try:
-        meta = await asyncio.to_thread(gdrive.verify_connection, sa, folder_id)
+        meta = await asyncio.to_thread(gdrive.verify_connection, sa, spreadsheet_id)
     except gdrive.GDriveError as e:
         raise HTTPException(400, str(e))
+    # Wipe out any stale folder config from previous attempts.
+    await db.gdrive_config.delete_one({"id": "default"})
     await _save_gdrive_config({
         "service_account_json": sa,
-        "folder_id": folder_id,
-        "folder_name": meta.get("name"),
+        "spreadsheet_id": spreadsheet_id,
+        "spreadsheet_name": meta.get("name"),
         "auto_sync": data.auto_sync,
         "connected_at": datetime.now(timezone.utc).isoformat(),
     })

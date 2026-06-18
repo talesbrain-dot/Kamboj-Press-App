@@ -23,7 +23,7 @@ export default function Settings() {
   const [gdriveLoading, setGdriveLoading] = useState(false);
   const [gdriveJson, setGdriveJson] = useState(null);
   const [gdriveJsonName, setGdriveJsonName] = useState('');
-  const [gdriveFolderId, setGdriveFolderId] = useState('');
+  const [gdriveSheet, setGdriveSheet] = useState('');
 
   useEffect(() => {
     api.get('/settings').then((r) => setS(r.data));
@@ -155,19 +155,19 @@ export default function Settings() {
 
   const connectGdrive = async () => {
     if (!gdriveJson) { toast({ title: 'Service-account JSON select karein', variant: 'destructive' }); return; }
-    if (!gdriveFolderId.trim()) { toast({ title: 'Drive folder ID dijiye', variant: 'destructive' }); return; }
+    if (!gdriveSheet.trim()) { toast({ title: 'Google Sheet URL ya ID dijiye', variant: 'destructive' }); return; }
     setGdriveLoading(true);
     try {
       const r = await api.post('/gdrive/connect', {
         service_account_json: gdriveJson,
-        folder_id: gdriveFolderId.trim(),
+        spreadsheet: gdriveSheet.trim(),
         auto_sync: true,
       });
       setGdrive(r.data);
       setGdriveJson(null);
       setGdriveJsonName('');
-      setGdriveFolderId('');
-      toast({ title: 'Google Drive connected', description: r.data.spreadsheet_url ? 'Sheet ban gayi.' : '' });
+      setGdriveSheet('');
+      toast({ title: 'Google Drive connected', description: 'Sheet me data sync ho gaya.' });
     } catch (e) {
       toast({
         title: 'Connect failed',
@@ -209,6 +209,12 @@ export default function Settings() {
       await api.delete('/gdrive/disconnect');
       setGdrive({ connected: false });
       toast({ title: 'Disconnected' });
+    } catch (e) {
+      toast({
+        title: 'Disconnect failed',
+        description: e?.response?.data?.detail || e?.message || 'Try again',
+        variant: 'destructive',
+      });
     } finally { setGdriveLoading(false); }
   };
 
@@ -324,17 +330,20 @@ export default function Settings() {
 
         {!gdrive?.connected ? (
           <div className="space-y-3">
-            <details className="text-sm bg-slate-50 dark:bg-slate-800/40 rounded-md p-3 border border-slate-200 dark:border-slate-800">
+            <details className="text-sm bg-slate-50 dark:bg-slate-800/40 rounded-md p-3 border border-slate-200 dark:border-slate-800" open>
               <summary className="cursor-pointer font-medium">Setup steps (one-time)</summary>
               <ol className="list-decimal pl-5 mt-2 space-y-1 text-slate-600 dark:text-slate-300 text-xs leading-relaxed">
                 <li>Go to <a className="text-blue-600 underline" href="https://console.cloud.google.com/" target="_blank" rel="noreferrer">console.cloud.google.com</a> → create a project (free).</li>
                 <li><b>APIs &amp; Services → Library</b> → enable <b>Google Drive API</b> and <b>Google Sheets API</b>.</li>
                 <li><b>IAM &amp; Admin → Service Accounts → Create Service Account</b>. Give it any name (no roles needed). Click Done.</li>
                 <li>Open the service account → <b>Keys → Add Key → Create new key → JSON</b>. A JSON file downloads — keep it safe.</li>
-                <li>Open Google Drive, create a folder (e.g. <i>Kamboj Press Sync</i>). Right-click → <b>Share</b> → paste the <code>client_email</code> from the JSON (looks like <code>xxx@xxx.iam.gserviceaccount.com</code>) → set <b>Editor</b>.</li>
-                <li>Open that folder in browser and copy the folder ID from the URL — the long string after <code>/folders/</code>.</li>
-                <li>Yahan upload karo JSON + paste folder ID → Connect.</li>
+                <li>Open <a className="text-blue-600 underline" href="https://drive.google.com" target="_blank" rel="noreferrer">Google Drive</a> → <b>+ New → Google Sheets</b> → ek blank sheet banao (naam: <i>Kamboj Press Orders</i>).</li>
+                <li>Sheet ke right-top <b>Share</b> button → JSON file me se <code>client_email</code> (ends with <code>@*.iam.gserviceaccount.com</code>) paste karo → <b>Editor</b> access → Send.</li>
+                <li>Sheet ka URL copy karo (browser address bar se) ya sirf ID (URL me <code>/d/</code> ke baad ka string). Niche paste karo → Connect.</li>
               </ol>
+              <div className="mt-2 text-xs bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-200 rounded p-2 border border-amber-200 dark:border-amber-900">
+                ⚠️ <b>Important:</b> Sheet aap khud banao Drive me — service account khud file nahi bana sakta (Google ki storage quota limitation hai).
+              </div>
             </details>
 
             <div className="space-y-2">
@@ -351,20 +360,20 @@ export default function Settings() {
             </div>
 
             <div className="space-y-1.5">
-              <Label>Drive Folder ID</Label>
+              <Label>Google Sheet URL or ID</Label>
               <Input
-                placeholder="e.g. 1A2B3cD4e5F6gH7iJ8kL9mN0o"
-                value={gdriveFolderId}
-                onChange={(e) => setGdriveFolderId(e.target.value)}
-                data-testid="gdrive-folder-input"
+                placeholder="https://docs.google.com/spreadsheets/d/<ID>/edit  (ya sirf ID)"
+                value={gdriveSheet}
+                onChange={(e) => setGdriveSheet(e.target.value)}
+                data-testid="gdrive-sheet-input"
               />
-              <p className="text-xs text-slate-500">Folder URL me <code>/folders/&lt;ID&gt;</code> ke baad ka string.</p>
+              <p className="text-xs text-slate-500">Drive me sheet bana ke service-account email ke saath Editor share karna na bhulein.</p>
             </div>
 
             <Button
               type="button"
               onClick={connectGdrive}
-              disabled={gdriveLoading || !gdriveJson || !gdriveFolderId.trim()}
+              disabled={gdriveLoading || !gdriveJson || !gdriveSheet.trim()}
               className="bg-blue-600 hover:bg-blue-700 text-white"
               data-testid="gdrive-connect-btn"
             >
@@ -376,8 +385,8 @@ export default function Settings() {
           <div className="space-y-3">
             <div className="grid sm:grid-cols-2 gap-3 text-sm">
               <div>
-                <div className="text-xs text-slate-500 uppercase">Folder</div>
-                <div className="font-medium truncate">{gdrive.folder_name || gdrive.folder_id}</div>
+                <div className="text-xs text-slate-500 uppercase">Sheet</div>
+                <div className="font-medium truncate">{gdrive.spreadsheet_name || gdrive.spreadsheet_id}</div>
               </div>
               <div>
                 <div className="text-xs text-slate-500 uppercase">Service Account</div>
