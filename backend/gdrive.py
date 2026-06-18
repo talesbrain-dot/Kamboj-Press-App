@@ -41,27 +41,37 @@ def _services(sa_info: dict):
 def verify_connection(sa_info: dict, folder_id: str) -> dict:
     """Confirm the service account can see the folder. Returns folder metadata."""
     drive, _ = _services(sa_info)
+    sa_email = sa_info.get("client_email", "<unknown>")
     try:
         meta = drive.files().get(
             fileId=folder_id,
-            fields="id,name,mimeType,owners(emailAddress,displayName)",
+            fields="id,name,mimeType,driveId",
             supportsAllDrives=True,
         ).execute()
     except HttpError as e:
         status = getattr(e.resp, "status", None)
         if status == 404:
             raise GDriveError(
-                "Folder nahi mila. Confirm: (1) folder ID sahi hai, "
-                "(2) folder service-account email ke saath share kiya hai (Editor access)."
+                f"Folder nahi mila (404). Most common reason: folder service-account "
+                f"email ke saath share nahi kiya gaya. Drive me folder kholo → Share → "
+                f"yeh email paste karo aur Editor access do: {sa_email}. "
+                f"Agar already share kiya hai, folder ID dobara check karo "
+                f"(URL me /folders/ ke baad ka string)."
             )
         if status == 403:
             raise GDriveError(
-                "Permission denied. Folder ko service-account email ke saath "
-                "Editor access pe share karein."
+                f"Permission denied (403). Folder ko {sa_email} ke saath Editor "
+                f"access pe share karo. Agar Shared Drive me hai, service account ko "
+                f"us Shared Drive ka member banao."
             )
-        raise GDriveError(f"Drive API error: {e}")
+        raise GDriveError(f"Drive API error ({status}): {e}")
+    except Exception as e:
+        raise GDriveError(f"Drive connection failed: {e}")
     if meta.get("mimeType") != "application/vnd.google-apps.folder":
-        raise GDriveError("Yeh ID ek folder ki nahi hai. Sahi Drive folder ID dijiye.")
+        raise GDriveError(
+            f"Yeh ID folder ki nahi hai — yeh '{meta.get('mimeType')}' hai. "
+            f"Drive folder ID dijiye (file ID nahi)."
+        )
     return meta
 
 
