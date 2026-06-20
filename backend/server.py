@@ -26,11 +26,16 @@ import gdrive
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-mongo_url = os.environ.get('MONGO_URL', 'mongodb+srv://KambojPress:Saaa60086009@kambojpressapp.ltwgpub.mongodb.net/?appName=KambojPressApp')
+mongo_url = os.environ.get('MONGO_URL')
+if not mongo_url:
+    raise RuntimeError("MONGO_URL environment variable is required")
+db_name = os.environ.get('DB_NAME', 'KambojPressApp')
 client = AsyncIOMotorClient(mongo_url)
-db = client['KambojPressApp']
+db = client[db_name]
 
-SECRET_KEY = os.environ.get('JWT_SECRET', 'press-order-book-secret-key-change-in-prod')
+SECRET_KEY = os.environ.get('JWT_SECRET')
+if not SECRET_KEY:
+    raise RuntimeError("JWT_SECRET environment variable is required")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_DAYS = 30
 
@@ -179,6 +184,7 @@ def normalize_dates(obj):
     return obj
 
 # ---------- Auth ----------
+@app.post("/auth/login")
 @api.post("/auth/login", response_model=TokenOut)
 async def login(data: LoginIn):
     user = await db.users.find_one({"username": data.username.lower().strip()})
@@ -247,6 +253,7 @@ async def list_customers(q: Optional[str] = None, user=Depends(get_current_user)
         ]}
     customers = await db.customers.find(query).sort("updated_at", -1).to_list(500)
 
+    # Aggregate balance + order count per customer in a single pass.
     customer_ids = [c.get("id") for c in customers if c.get("id")]
     balance_map = {cid: {"total_balance": 0.0, "total_orders": 0, "total_business": 0.0} for cid in customer_ids}
     if customer_ids:
@@ -367,6 +374,8 @@ async def list_orders(user=Depends(get_current_user)):
 
 @api.get("/orders/balance/list")
 async def list_balance_orders(user=Depends(get_current_user)):
+    """Return only orders that still have an outstanding balance > 0,
+    sorted by most outstanding first."""
     orders = await db.orders.find().sort("created_at", -1).to_list(2000)
     serialized = [serialize_order(o) for o in orders]
     pending = [o for o in serialized if (o.get("balance") or 0) > 0]
@@ -388,6 +397,7 @@ async def update_order(order_id: str, data: OrderUpdateIn, user=Depends(get_curr
     if data.assigned_user_ids is not None: update["assigned_user_ids"] = data.assigned_user_ids
     if data.customer_address is not None: update["customer_address"] = data.customer_address
     if data.notes is not None: update["notes"] = data.notes
+    # Staff is NOT allowed to change advance_paid after order creation (only admin).
     if data.advance_paid is not None and user.get("role") == "admin":
         update["advance_paid"] = float(data.advance_paid)
 
@@ -460,9 +470,11 @@ async def add_payment(order_id: str, data: PaymentIn, user=Depends(get_current_u
     schedule_gdrive_sync()
     return serialize_order(o)
 
+
 class PaymentUpdateIn(BaseModel):
     amount: Optional[float] = None
     note: Optional[str] = None
+
 
 @api.patch("/orders/{order_id}/payments/{payment_id}")
 async def update_payment(order_id: str, payment_id: str, data: PaymentUpdateIn, admin=Depends(require_admin)):
@@ -487,6 +499,7 @@ async def update_payment(order_id: str, payment_id: str, data: PaymentUpdateIn, 
     schedule_gdrive_sync()
     return serialize_order(o)
 
+
 @api.delete("/orders/{order_id}/payments/{payment_id}")
 async def delete_payment(order_id: str, payment_id: str, admin=Depends(require_admin)):
     o = await db.orders.find_one({"id": order_id})
@@ -501,6 +514,7 @@ async def delete_payment(order_id: str, payment_id: str, admin=Depends(require_a
     schedule_gdrive_sync()
     return serialize_order(o)
 
+
 @api.delete("/orders/{order_id}")
 async def delete_order(order_id: str, admin=Depends(require_admin)):
     res = await db.orders.delete_one({"id": order_id})
@@ -512,7 +526,10 @@ async def delete_order(order_id: str, admin=Depends(require_admin)):
 # ---------- Reminders ----------
 @api.get("/reminders")
 async def reminders(request: Request, include_seen: bool = True, user=Depends(get_current_user)):
+    # Header se pata chalega ki request kis page se aa rahi hai
     referer = request.headers.get("referer", "")
+    
+    # 🔥 Agar url mein 'dashboard' word hai, toh reminders mat dikhao!
     if "dashboard" in referer.lower() and user.get("role") != "staff":
         return []
 
@@ -631,7 +648,8 @@ async def update_settings(data: SettingsIn, admin=Depends(require_admin)):
     s = await db.settings.find_one({"id": "default"})
     return clean_doc(s)
 
-# ---------- Branding ----------
+# ---------- Branding (public — used by login screen and header) ----------
+@app.get("/branding")
 @api.get("/branding")
 async def get_branding():
     s = await db.settings.find_one({"id": "default"})
@@ -645,13 +663,16 @@ async def get_branding():
 
 # ---------- Backup (Excel) ----------
 def _fmt_dt(val):
-    if not val: return ""
-    if isinstance(val, datetime): return val.strftime("%Y-%m-%d %H:%M:%S")
+    if not val:
+        return ""
+    if isinstance(val, datetime):
+        return val.strftime("%Y-%m-%d %H:%M:%S")
     return str(val)
+
 
 def _style_header(ws, num_cols):
     header_font = Font(bold=True, color="FFFFFF")
-    fill = PatternFill("solid", fgColor="F97316")
+    fill = PatternFill("solid", fgColor="F97316")  # orange-500
     align = Alignment(horizontal="left", vertical="center")
     for col_idx in range(1, num_cols + 1):
         cell = ws.cell(row=1, column=col_idx)
@@ -660,42 +681,61 @@ def _style_header(ws, num_cols):
         cell.alignment = align
     ws.freeze_panes = "A2"
 
+
 def _autosize(ws):
     for col in ws.columns:
-        try: letter = col[0].column_letter
-        except AttributeError: continue
+        try:
+            letter = col[0].column_letter
+        except AttributeError:
+            continue
         max_len = 0
         for cell in col:
             v = cell.value
-            if v is None: continue
+            if v is None:
+                continue
             length = len(str(v))
-            if length > max_len: max_len = length
+            if length > max_len:
+                max_len = length
         ws.column_dimensions[letter].width = min(max(max_len + 2, 12), 50)
 
+
 async def _order_summary_rows(include_serial: bool = True) -> list:
+    """Build the compact 'order summary' table as a list-of-lists (header + rows).
+
+    Layout (matches the user's screenshot): one row per product. The order-level
+    fields (#, OrderNo, OrderDate, CustomerName, Phone, Advance, Balance) are
+    only filled on the first product row of each order. Per-product fields
+    (Qty, Product, Price, Total = Price*Qty) appear on every row.
+    """
     orders = await db.orders.find().sort("created_at", 1).to_list(100000)
     header = [
         "#", "Order No", "Order Date", "Customer Name", "Phone",
         "Qty", "Product", "Price", "Total", "Advance", "Balance",
     ]
-    if not include_serial: header = header[1:]
+    if not include_serial:
+        header = header[1:]
     rows = [header]
 
     ist_offset = timedelta(hours=5, minutes=30)
     serial = 0
     for o in orders:
         products = o.get("products") or []
-        if not products: continue
+        if not products:
+            continue
         serial += 1
         created = o.get("created_at")
         if isinstance(created, str):
-            try: created = datetime.fromisoformat(created.replace("Z", "+00:00"))
-            except Exception: created = None
+            try:
+                created = datetime.fromisoformat(created.replace("Z", "+00:00"))
+            except Exception:
+                created = None
         if isinstance(created, datetime):
-            if created.tzinfo is None: created = created.replace(tzinfo=timezone.utc)
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
             local = created.astimezone(timezone(ist_offset))
             order_date = local.strftime("%d-%m-%Y %I:%M %p")
-        else: order_date = ""
+        else:
+            order_date = ""
 
         order_total = sum(float(p.get("price") or 0) for p in products)
         advance = float(o.get("advance_paid") or 0)
@@ -709,17 +749,65 @@ async def _order_summary_rows(include_serial: bool = True) -> list:
             unit_price = (line_total / qty) if qty else line_total
             if idx == 0:
                 row = [
-                    serial, o.get("order_no") or "", order_date, o.get("customer_name") or "", o.get("customer_phone") or "",
-                    qty, p.get("name") or "", round(unit_price, 2), round(line_total, 2), round(advance, 2) if advance else "", round(balance, 2) if balance else "",
+                    serial,
+                    o.get("order_no") or "",
+                    order_date,
+                    o.get("customer_name") or "",
+                    o.get("customer_phone") or "",
+                    qty,
+                    p.get("name") or "",
+                    round(unit_price, 2),
+                    round(line_total, 2),
+                    round(advance, 2) if advance else "",
+                    round(balance, 2) if balance else "",
                 ]
             else:
                 row = [
                     "", "", "", "", "",
-                    qty, p.get("name") or "", round(unit_price, 2), round(line_total, 2), "", "",
+                    qty,
+                    p.get("name") or "",
+                    round(unit_price, 2),
+                    round(line_total, 2),
+                    "", "",
                 ]
-            if not include_serial: row = row[1:]
+            if not include_serial:
+                row = row[1:]
             rows.append(row)
     return rows
+
+
+async def _build_order_summary_workbook() -> bytes:
+    rows = await _order_summary_rows(include_serial=True)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Order Summary"
+    for r in rows:
+        ws.append(r)
+    # Style header
+    bold = Font(bold=True, color="FFFFFF")
+    fill = PatternFill("solid", fgColor="2563EB")
+    center = Alignment(horizontal="center", vertical="center")
+    for cell in ws[1]:
+        cell.font = bold
+        cell.fill = fill
+        cell.alignment = center
+    # Auto width
+    for col_idx, col_cells in enumerate(ws.columns, start=1):
+        letter = col_cells[0].column_letter
+        max_len = 0
+        for cell in col_cells:
+            v = cell.value
+            if v is None:
+                continue
+            length = len(str(v))
+            if length > max_len:
+                max_len = length
+        ws.column_dimensions[letter].width = min(max(max_len + 2, 10), 40)
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf.read()
+
 
 async def _build_backup_workbook() -> bytes:
     users = await db.users.find().to_list(10000)
@@ -727,17 +815,22 @@ async def _build_backup_workbook() -> bytes:
     orders = await db.orders.find().sort("created_at", -1).to_list(100000)
     settings_doc = await db.settings.find_one({"id": "default"}) or {}
 
+    customer_map = {c.get("id"): c for c in customers}
+
     wb = Workbook()
+
+    # Sheet 1 - Summary
     ws = wb.active
     ws.title = "Summary"
     ws.append(["Field", "Value"])
     ws.append(["App Name", settings_doc.get("app_name") or "Press Order Book"])
     ws.append(["Company Name", settings_doc.get("company_name") or ""])
+    ws.append(["Company Phone", settings_doc.get("company_phone") or ""])
+    ws.append(["Company Address", settings_doc.get("company_address") or ""])
     ws.append(["Exported At", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")])
     ws.append(["Total Users", len(users)])
     ws.append(["Total Customers", len(customers)])
     ws.append(["Total Orders", len(orders)])
-    
     total_revenue = 0.0
     total_paid_all = 0.0
     total_balance_all = 0.0
@@ -753,121 +846,516 @@ async def _build_backup_workbook() -> bytes:
     _style_header(ws, 2)
     _autosize(ws)
 
-    # Sheet 2 - Orders
+    # Sheet 2 - Orders (one row per order)
     ws = wb.create_sheet("Orders")
-    headers = ["Order No", "Date Created", "Last Updated", "Customer Name", "Customer Phone", "Customer Address", "Products Count", "Products", "Total (INR)", "Advance Paid (INR)", "Paid (INR)", "Balance (INR)", "Created By", "Order Notes"]
+    headers = [
+        "Order No", "Date Created", "Last Updated", "Customer Name", "Customer Phone", "Customer Address",
+        "Products Count", "Products (name x qty @ price [status])",
+        "Total (INR)", "Advance Paid (INR)", "Other Payments (INR)", "Paid (INR)", "Balance (INR)",
+        "Created By", "Assigned User IDs", "Order Notes",
+    ]
     ws.append(headers)
     for o in orders:
         prods = o.get("products", [])
         total = sum((p.get("price", 0) or 0) for p in prods)
         advance = o.get("advance_paid", 0) or 0
-        paid = advance + sum(p.get("amount", 0) for p in o.get("payments", []))
-        product_str = "; ".join(f"{p.get('name','') or ''} x{p.get('quantity',0)} @ {p.get('price',0)}" for p in prods)
-        ws.append([o.get("order_no", ""), _fmt_dt(o.get("created_at")), _fmt_dt(o.get("updated_at")), o.get("customer_name", ""), o.get("customer_phone", ""), o.get("customer_address", ""), len(prods), product_str, round(total, 2), round(advance, 2), round(paid, 2), round(max(total - paid, 0), 2), o.get("created_by_name", ""), o.get("notes", "")])
+        other_pmts = sum(p.get("amount", 0) for p in o.get("payments", []))
+        paid = advance + other_pmts
+        balance = max(total - paid, 0)
+        product_str = "; ".join(
+            f"{p.get('name','')} x{p.get('quantity',0)} @ {p.get('price',0)} [{p.get('status','')}]"
+            for p in prods
+        )
+        ws.append([
+            o.get("order_no", ""),
+            _fmt_dt(o.get("created_at")),
+            _fmt_dt(o.get("updated_at")),
+            o.get("customer_name", ""),
+            o.get("customer_phone", ""),
+            o.get("customer_address", ""),
+            len(prods),
+            product_str,
+            round(total, 2),
+            round(advance, 2),
+            round(other_pmts, 2),
+            round(paid, 2),
+            round(balance, 2),
+            o.get("created_by_name", ""),
+            ", ".join(o.get("assigned_user_ids", []) or []),
+            o.get("notes", ""),
+        ])
     _style_header(ws, len(headers))
     _autosize(ws)
-    
+
+    # Sheet 3 - Order Products (one row per product line item)
+    ws = wb.create_sheet("Order Products")
+    headers = [
+        "Order No", "Order Date", "Customer Name", "Customer Phone",
+        "Product Name", "Quantity", "Price (INR)", "Status", "Product Notes", "Product Updated At",
+    ]
+    ws.append(headers)
+    for o in orders:
+        for p in o.get("products", []):
+            ws.append([
+                o.get("order_no", ""),
+                _fmt_dt(o.get("created_at")),
+                o.get("customer_name", ""),
+                o.get("customer_phone", ""),
+                p.get("name", ""),
+                p.get("quantity", 0),
+                round(p.get("price", 0) or 0, 2),
+                p.get("status", ""),
+                p.get("notes", ""),
+                _fmt_dt(p.get("updated_at")),
+            ])
+    _style_header(ws, len(headers))
+    _autosize(ws)
+
+    # Sheet 4 - Payments
+    ws = wb.create_sheet("Payments")
+    headers = ["Order No", "Customer Name", "Type", "Amount (INR)", "Date", "Recorded By", "Note"]
+    ws.append(headers)
+    for o in orders:
+        if (o.get("advance_paid") or 0) > 0:
+            ws.append([
+                o.get("order_no", ""),
+                o.get("customer_name", ""),
+                "Advance",
+                round(o.get("advance_paid", 0) or 0, 2),
+                _fmt_dt(o.get("created_at")),
+                o.get("created_by_name", ""),
+                "Initial advance at order creation",
+            ])
+        for pmt in o.get("payments", []):
+            ws.append([
+                o.get("order_no", ""),
+                o.get("customer_name", ""),
+                "Payment",
+                round(pmt.get("amount", 0) or 0, 2),
+                _fmt_dt(pmt.get("at")),
+                pmt.get("by", ""),
+                pmt.get("note", ""),
+            ])
+    _style_header(ws, len(headers))
+    _autosize(ws)
+
+    # Sheet 5 - Customers (with balance)
+    ws = wb.create_sheet("Customers")
+    headers = ["Name", "Phone", "Address", "Orders", "Total Business (INR)", "Total Paid (INR)", "Outstanding Balance (INR)", "Created At", "Last Updated"]
+    ws.append(headers)
+    # Compute per-customer aggregates
+    per_cust = {}
+    for o in orders:
+        cid = o.get("customer_id")
+        if not cid:
+            continue
+        t = sum((p.get("price", 0) or 0) for p in o.get("products", []))
+        pd = (o.get("advance_paid", 0) or 0) + sum(p.get("amount", 0) for p in o.get("payments", []))
+        b = max(t - pd, 0)
+        agg = per_cust.setdefault(cid, {"orders": 0, "biz": 0.0, "paid": 0.0, "bal": 0.0})
+        agg["orders"] += 1
+        agg["biz"] += t
+        agg["paid"] += pd
+        agg["bal"] += b
+    for c in customers:
+        cid = c.get("id")
+        agg = per_cust.get(cid, {"orders": 0, "biz": 0.0, "paid": 0.0, "bal": 0.0})
+        ws.append([
+            c.get("name", ""),
+            c.get("phone", ""),
+            c.get("address", ""),
+            agg["orders"],
+            round(agg["biz"], 2),
+            round(agg["paid"], 2),
+            round(agg["bal"], 2),
+            _fmt_dt(c.get("created_at")),
+            _fmt_dt(c.get("updated_at")),
+        ])
+    _style_header(ws, len(headers))
+    _autosize(ws)
+
+    # Sheet 6 - Outstanding Balance (orders with balance > 0)
+    ws = wb.create_sheet("Outstanding Balance")
+    headers = ["Order No", "Date", "Customer Name", "Customer Phone", "Total (INR)", "Paid (INR)", "Balance (INR)", "Days Old"]
+    ws.append(headers)
+    now = datetime.now(timezone.utc)
+    pending_rows = []
+    for o in orders:
+        t = sum((p.get("price", 0) or 0) for p in o.get("products", []))
+        pd = (o.get("advance_paid", 0) or 0) + sum(p.get("amount", 0) for p in o.get("payments", []))
+        b = max(t - pd, 0)
+        if b <= 0:
+            continue
+        created = o.get("created_at")
+        days_old = ""
+        if isinstance(created, datetime):
+            try:
+                if created.tzinfo is None:
+                    created = created.replace(tzinfo=timezone.utc)
+                days_old = (now - created).days
+            except Exception:
+                days_old = ""
+        pending_rows.append([
+            o.get("order_no", ""), _fmt_dt(o.get("created_at")),
+            o.get("customer_name", ""), o.get("customer_phone", ""),
+            round(t, 2), round(pd, 2), round(b, 2), days_old,
+        ])
+    pending_rows.sort(key=lambda r: r[6], reverse=True)  # highest balance first
+    for r in pending_rows:
+        ws.append(r)
+    _style_header(ws, len(headers))
+    _autosize(ws)
+
+    # Sheet 7 - Users
+    ws = wb.create_sheet("Users")
+    headers = ["Username", "Name", "Role", "Created At"]
+    ws.append(headers)
+    for u in users:
+        ws.append([u.get("username", ""), u.get("name", ""), u.get("role", ""), _fmt_dt(u.get("created_at"))])
+    _style_header(ws, len(headers))
+    _autosize(ws)
+
     out = io.BytesIO()
     wb.save(out)
     out.seek(0)
     return out.getvalue()
 
+
+@app.get("/backup")
 @api.get("/backup")
 async def export_backup(admin=Depends(require_admin)):
     data = await _build_backup_workbook()
-    return StreamingResponse(io.BytesIO(data), media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"press-order-book-backup-{stamp}.xlsx"
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Access-Control-Expose-Headers": "Content-Disposition",
+        },
+    )
+
+
+@api.get("/backup/summary")
+async def export_order_summary(admin=Depends(require_admin)):
+    data = await _build_order_summary_workbook()
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"order-summary-{stamp}.xlsx"
+    return StreamingResponse(
+        io.BytesIO(data),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Access-Control-Expose-Headers": "Content-Disposition",
+        },
+    )
+
 
 # ---------- Google Drive Sync ----------
 _GDRIVE_SYNC_TASK: Optional[asyncio.Task] = None
 _GDRIVE_SYNC_DEBOUNCE_SEC = 3.0
 
-async def _load_gdrive_config() -> Optional[dict]: return await db.gdrive_config.find_one({"id": "default"})
-async def _save_gdrive_config(update: dict) -> dict: return await db.gdrive_config.find_one_and_update({"id": "default"}, {"$set": update, "$setOnInsert": {"id": "default"}}, upsert=True, return_document=ReturnDocument.AFTER)
+
+async def _load_gdrive_config() -> Optional[dict]:
+    return await db.gdrive_config.find_one({"id": "default"})
+
+
+async def _save_gdrive_config(update: dict) -> dict:
+    doc = await db.gdrive_config.find_one_and_update(
+        {"id": "default"},
+        {"$set": update, "$setOnInsert": {"id": "default"}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    return doc
+
 
 def _public_gdrive_status(cfg: Optional[dict]) -> dict:
-    if not cfg: return {"connected": False, "has_config": False}
+    if not cfg:
+        return {"connected": False, "has_config": False}
     sa = cfg.get("service_account_json") or {}
-    return {"connected": bool(cfg.get("service_account_json") and cfg.get("spreadsheet_id")), "has_config": True, "auto_sync": bool(cfg.get("auto_sync", True)), "spreadsheet_id": cfg.get("spreadsheet_id"), "last_sync_at": cfg.get("last_sync_at")}
+    has_config = bool(cfg.get("service_account_json") or cfg.get("spreadsheet_id") or cfg.get("folder_id"))
+    return {
+        "connected": bool(cfg.get("service_account_json") and cfg.get("spreadsheet_id")),
+        "has_config": has_config,
+        "auto_sync": bool(cfg.get("auto_sync", True)),
+        "service_account_email": sa.get("client_email"),
+        "spreadsheet_id": cfg.get("spreadsheet_id"),
+        "spreadsheet_name": cfg.get("spreadsheet_name"),
+        "spreadsheet_url": gdrive.sheet_url(cfg["spreadsheet_id"]) if cfg.get("spreadsheet_id") else None,
+        "last_sync_at": cfg.get("last_sync_at"),
+        "last_sync_status": cfg.get("last_sync_status"),
+        "last_sync_error": cfg.get("last_sync_error"),
+    }
+
 
 async def _do_gdrive_sync() -> dict:
     cfg = await _load_gdrive_config()
-    if not cfg or not cfg.get("service_account_json") or not cfg.get("spreadsheet_id"): return {}
+    if not cfg or not cfg.get("service_account_json") or not cfg.get("spreadsheet_id"):
+        raise GDriveNotConfigured("Google Drive abhi tak connect nahi hua hai.")
     sa_info = cfg["service_account_json"]
     sheet_id = cfg["spreadsheet_id"]
     rows = await _order_summary_rows(include_serial=True)
     try:
+        # Make sure SA still has edit access; raises if not.
         sheet_id = await asyncio.to_thread(gdrive.ensure_spreadsheet, sa_info, sheet_id)
         result = await asyncio.to_thread(gdrive.write_rows, sa_info, sheet_id, rows)
-        await _save_gdrive_config({"last_sync_status": "ok", "last_sync_at": datetime.now(timezone.utc).isoformat()})
-    except Exception as e:
-        await _save_gdrive_config({"last_sync_status": "error", "last_sync_at": datetime.now(timezone.utc).isoformat()})
-    return {"spreadsheet_id": sheet_id}
+    except gdrive.GDriveError as e:
+        await _save_gdrive_config({
+            "last_sync_status": "error",
+            "last_sync_error": str(e),
+            "last_sync_at": datetime.now(timezone.utc).isoformat(),
+        })
+        raise
+    await _save_gdrive_config({
+        "last_sync_status": "ok",
+        "last_sync_error": None,
+        "last_sync_at": datetime.now(timezone.utc).isoformat(),
+        "last_sync_rows": result.get("updated_rows", 0),
+    })
+    return {
+        "spreadsheet_id": sheet_id,
+        "spreadsheet_url": gdrive.sheet_url(sheet_id),
+        "rows": result.get("updated_rows", 0),
+    }
 
-def schedule_gdrive_sync() -> None:
-    global _GDRIVE_SYNC_TASK
-    try: loop = asyncio.get_running_loop()
-    except RuntimeError: return
-    async def _wrap():
-        cfg = await _load_gdrive_config()
-        if not cfg or not cfg.get("auto_sync", True): return
+
+class GDriveNotConfigured(Exception):
+    pass
+
+
+async def _debounced_sync():
+    try:
         await asyncio.sleep(_GDRIVE_SYNC_DEBOUNCE_SEC)
         await _do_gdrive_sync()
-    if _GDRIVE_SYNC_TASK and not _GDRIVE_SYNC_TASK.done(): _GDRIVE_SYNC_TASK.cancel()
+    except asyncio.CancelledError:
+        pass
+    except GDriveNotConfigured:
+        pass
+    except Exception as e:
+        logging.warning(f"GDrive auto-sync failed: {e}")
+
+
+def schedule_gdrive_sync() -> None:
+    """Fire-and-forget: schedule a debounced sync. Safe to call from any
+    order-mutating endpoint. If Drive isn't connected or auto-sync is off,
+    the task is a cheap no-op."""
+    global _GDRIVE_SYNC_TASK
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+
+    async def _wrap():
+        cfg = await _load_gdrive_config()
+        if not cfg or not cfg.get("auto_sync", True):
+            return
+        if not cfg.get("service_account_json") or not cfg.get("spreadsheet_id"):
+            return
+        await _debounced_sync()
+
+    if _GDRIVE_SYNC_TASK and not _GDRIVE_SYNC_TASK.done():
+        _GDRIVE_SYNC_TASK.cancel()
     _GDRIVE_SYNC_TASK = loop.create_task(_wrap())
+
 
 class GDriveConnectIn(BaseModel):
     service_account_json: dict
-    spreadsheet: str
+    spreadsheet: str  # URL or ID of an existing Google Sheet (user-created + shared with SA)
     auto_sync: bool = True
+
 
 @api.get("/gdrive/status")
 async def gdrive_status(admin=Depends(require_admin)):
-    return _public_gdrive_status(await _load_gdrive_config())
+    cfg = await _load_gdrive_config()
+    return _public_gdrive_status(cfg)
+
 
 @api.post("/gdrive/connect")
 async def gdrive_connect(data: GDriveConnectIn, admin=Depends(require_admin)):
+    sa = data.service_account_json
+    if not isinstance(sa, dict) or sa.get("type") != "service_account" or not sa.get("client_email"):
+        raise HTTPException(400, "Yeh service-account JSON valid nahi lag rahi. Google Cloud Console se naya key download karein.")
     spreadsheet_id = gdrive.parse_spreadsheet_id(data.spreadsheet)
+    if not spreadsheet_id:
+        raise HTTPException(400, "Google Sheet URL ya ID zaruri hai.")
+    try:
+        meta = await asyncio.to_thread(gdrive.verify_connection, sa, spreadsheet_id)
+    except gdrive.GDriveError as e:
+        raise HTTPException(400, str(e))
+    # Wipe out any stale folder config from previous attempts.
     await db.gdrive_config.delete_one({"id": "default"})
-    await _save_gdrive_config({"service_account_json": data.service_account_json, "spreadsheet_id": spreadsheet_id, "auto_sync": data.auto_sync, "connected_at": datetime.now(timezone.utc).isoformat()})
-    await _do_gdrive_sync()
-    return _public_gdrive_status(await _load_gdrive_config())
+    await _save_gdrive_config({
+        "service_account_json": sa,
+        "spreadsheet_id": spreadsheet_id,
+        "spreadsheet_name": meta.get("name"),
+        "auto_sync": data.auto_sync,
+        "connected_at": datetime.now(timezone.utc).isoformat(),
+    })
+    # Run first sync immediately so the user sees data right away.
+    try:
+        sync_result = await _do_gdrive_sync()
+    except Exception as e:
+        raise HTTPException(400, f"Connected, but first sync failed: {e}")
+    cfg = await _load_gdrive_config()
+    out = _public_gdrive_status(cfg)
+    out["first_sync"] = sync_result
+    return out
+
 
 @api.post("/gdrive/sync")
 async def gdrive_sync_now(admin=Depends(require_admin)):
-    return await _do_gdrive_sync()
+    try:
+        result = await _do_gdrive_sync()
+    except GDriveNotConfigured as e:
+        raise HTTPException(400, str(e))
+    except gdrive.GDriveError as e:
+        raise HTTPException(400, str(e))
+    return result
+
+
+@api.patch("/gdrive/auto-sync")
+async def gdrive_toggle_auto(data: dict, admin=Depends(require_admin)):
+    await _save_gdrive_config({"auto_sync": bool(data.get("auto_sync", True))})
+    cfg = await _load_gdrive_config()
+    return _public_gdrive_status(cfg)
+
+
+@api.delete("/gdrive/disconnect")
+async def gdrive_disconnect(admin=Depends(require_admin)):
+    await db.gdrive_config.delete_one({"id": "default"})
+    return {"connected": False, "has_config": False}
 
 # ---------- Stats ----------
+@app.get("/stats")
 @api.get("/stats")
 async def stats(user=Depends(get_current_user), year: Optional[int] = None, month: Optional[int] = None):
+    """
+    All-time + today by default. Optional ?year=YYYY filters by year (IST).
+    Optional ?year=YYYY&month=MM filters by specific month.
+    """
     orders = await db.orders.find().to_list(5000)
-    total_revenue = sum((order_total(o) or 0) for o in orders)
-    total_paid = sum((order_paid(o) or 0) for o in orders)
-    
-    pending = in_progress = delivered = 0
+
+    def aggregate(order_list):
+        total_orders = len(order_list)
+        total_revenue = sum((order_total(o) or 0) for o in order_list)
+        total_paid = sum((order_paid(o) or 0) for o in order_list)
+        balance = max(total_revenue - total_paid, 0)
+        pending = in_progress = delivered = 0
+        for o in order_list:
+            statuses = [p.get("status") for p in o.get("products", [])]
+            if not statuses: continue
+            if all(s == "Delivered" for s in statuses):
+                delivered += 1
+            elif all(s == "Pending" for s in statuses):
+                pending += 1
+            else:
+                in_progress += 1
+        return {
+            "total_orders": total_orders,
+            "total_revenue": total_revenue,
+            "total_paid": total_paid,
+            "balance_due": balance,
+            "pending": pending,
+            "in_progress": in_progress,
+            "delivered": delivered,
+        }
+
+    IST = timezone(timedelta(hours=5, minutes=30))
+
+    def order_ist_date(o):
+        ca = o.get("created_at")
+        if not ca: return None
+        if isinstance(ca, str):
+            try:
+                ca = datetime.fromisoformat(ca.replace("Z", "+00:00"))
+            except Exception:
+                return ca[:10]
+        if ca.tzinfo is None:
+            ca = ca.replace(tzinfo=timezone.utc)
+        return ca.astimezone(IST)
+
+    # Period filter (year / month)
+    period_orders = orders
+    period_label = None
+    if year is not None:
+        period_orders = []
+        for o in orders:
+            d = order_ist_date(o)
+            if isinstance(d, datetime) and d.year == year:
+                if month is None or d.month == month:
+                    period_orders.append(o)
+        if month is not None:
+            period_label = f"{year}-{month:02d}"
+        else:
+            period_label = str(year)
+
+    # Today aggregate
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    today_orders = []
     for o in orders:
-        statuses = [p.get("status") for p in o.get("products", [])]
-        if not statuses: continue
-        if all(s == "Delivered" for s in statuses): delivered += 1
-        elif all(s == "Pending" for s in statuses): pending += 1
-        else: in_progress += 1
+        d = order_ist_date(o)
+        ds = d.strftime("%Y-%m-%d") if isinstance(d, datetime) else (d if isinstance(d, str) else None)
+        if ds == today_str:
+            today_orders.append(o)
 
+    result = aggregate(period_orders if year is not None else orders)
+    result["today"] = aggregate(today_orders)
+    result["period"] = period_label
+    result["reminders"] = []
+    return result
+
+
+@api.get("/stats/periods")
+async def stats_periods(admin=Depends(require_admin)):
+    """Returns available years and (year, month) pairs based on existing orders (IST)."""
+    orders = await db.orders.find({}, {"created_at": 1}).to_list(20000)
+    IST = timezone(timedelta(hours=5, minutes=30))
+    year_set = set()
+    ym_set = set()
+    for o in orders:
+        ca = o.get("created_at")
+        if not ca: continue
+        if isinstance(ca, str):
+            try:
+                ca = datetime.fromisoformat(ca.replace("Z", "+00:00"))
+            except Exception:
+                continue
+        if ca.tzinfo is None:
+            ca = ca.replace(tzinfo=timezone.utc)
+        d = ca.astimezone(IST)
+        year_set.add(d.year)
+        ym_set.add((d.year, d.month))
     return {
-        "total_orders": len(orders), "total_revenue": total_revenue, "total_paid": total_paid, "balance_due": max(total_revenue - total_paid, 0),
-        "pending": pending, "in_progress": in_progress, "delivered": delivered, "today": {"total_orders": 0, "total_revenue": 0, "total_paid": 0, "balance_due": 0}, "reminders": []
+        "years": sorted(year_set, reverse=True),
+        "months": sorted([{"year": y, "month": m} for (y, m) in ym_set], key=lambda x: (-x["year"], -x["month"])),
     }
-
 # ---------- Statuses ----------
 class StatusIn(BaseModel):
     name: str
 
 @api.get("/statuses")
 async def list_statuses(user=Depends(get_current_user)):
-    return {"statuses": await get_allowed_statuses(), "builtin": BUILTIN_STATUSES, "protected": list(PROTECTED_STATUSES)}
+    statuses = await get_allowed_statuses()
+    s = await db.settings.find_one({"id": "default"}, {"custom_statuses": 1}) or {}
+    return {
+        "statuses": statuses,
+        "builtin": BUILTIN_STATUSES,
+        "custom": s.get("custom_statuses") or [],
+        "protected": list(PROTECTED_STATUSES),
+    }
 
 @api.post("/statuses")
 async def add_status(data: StatusIn, admin=Depends(require_admin)):
     name = (data.name or "").strip()
-    if not name or name in await get_allowed_statuses(): raise HTTPException(400, "Invalid status name")
+    if not name:
+        raise HTTPException(400, "Status name is required")
+    if len(name) > 40:
+        raise HTTPException(400, "Status name too long")
+    existing = await get_allowed_statuses()
+    if name in existing:
+        raise HTTPException(400, "Status already exists")
     s = await db.settings.find_one({"id": "default"}) or {}
     custom = list(s.get("custom_statuses") or [])
     custom.append(name)
@@ -876,53 +1364,165 @@ async def add_status(data: StatusIn, admin=Depends(require_admin)):
 
 @api.delete("/statuses/{name}")
 async def delete_status(name: str, admin=Depends(require_admin)):
-    if name in PROTECTED_STATUSES or name in BUILTIN_STATUSES: raise HTTPException(400, "Cannot delete status")
+    if name in PROTECTED_STATUSES:
+        raise HTTPException(400, f"'{name}' is protected and cannot be deleted")
+    if name in BUILTIN_STATUSES:
+        raise HTTPException(400, f"'{name}' is a built-in status and cannot be deleted")
     s = await db.settings.find_one({"id": "default"}) or {}
     custom = [c for c in (s.get("custom_statuses") or []) if c != name]
     await db.settings.update_one({"id": "default"}, {"$set": {"custom_statuses": custom}}, upsert=True)
+    # Reset any products still using this status back to "Pending"
+    await db.orders.update_many(
+        {"products.status": name},
+        {"$set": {"products.$[p].status": "Pending"}},
+        array_filters=[{"p.status": name}],
+    )
     return {"ok": True, "statuses": await get_allowed_statuses()}
 
-# ---------- Bypass Routes Rules (Sahi Alternate Tarika) ----------
-# Middleware hatane ke baad hum direct explicit routing use kar rahe hain jo clash nahi hone degi:
+# ---------- Init ----------
+async def seed_admin():
+    if await db.users.count_documents({}) == 0:
+        await db.users.insert_one({
+            "id": str(uuid.uuid4()),
+            "name": "Admin",
+            "username": "admin",
+            "password_hash": hash_pw("admin123"),
+            "role": "admin",
+            "created_at": datetime.now(timezone.utc),
+        })
+        logging.info("Seeded default admin: admin / admin123")
+    if not await db.settings.find_one({"id": "default"}):
+        await db.settings.insert_one(DEFAULT_SETTINGS.copy())
+    else:
+        await db.settings.update_one(
+            {"id": "default", "app_name": {"$exists": False}},
+            {"$set": {"app_name": "Press Order Book"}},
+        )
+
+async def migrate_statuses():
+    # NOTE: Old "Printing → Digital Printing" migration removed.
+    # "Printing" is now a first-class built-in status (replacing "Screen Printing").
+
+    # Migrate Cutting -> Binding
+    res = await db.orders.update_many(
+        {"products.status": "Cutting"},
+        {"$set": {"products.$[p].status": "Binding"}},
+        array_filters=[{"p.status": "Cutting"}],
+    )
+    if res.modified_count:
+        logging.info(f"Migrated {res.modified_count} order(s): Cutting -> Binding")
+
+    # Migrate Packing -> Pending (Flex removed from builtin statuses)
+    res = await db.orders.update_many(
+        {"products.status": "Packing"},
+        {"$set": {"products.$[p].status": "Pending"}},
+        array_filters=[{"p.status": "Packing"}],
+    )
+    if res.modified_count:
+        logging.info(f"Migrated {res.modified_count} order(s): Packing -> Pending")
+
+    # Flex removed: reset existing Flex products to Pending
+    res = await db.orders.update_many(
+        {"products.status": "Flex"},
+        {"$set": {"products.$[p].status": "Pending"}},
+        array_filters=[{"p.status": "Flex"}],
+    )
+    if res.modified_count:
+        logging.info(f"Migrated {res.modified_count} order(s): Flex -> Pending")
+
+    # Rename Screen Printing -> Printing
+    res = await db.orders.update_many(
+        {"products.status": "Screen Printing"},
+        {"$set": {"products.$[p].status": "Printing"}},
+        array_filters=[{"p.status": "Screen Printing"}],
+    )
+    if res.modified_count:
+        logging.info(f"Migrated {res.modified_count} order(s): Screen Printing -> Printing")
+
+@app.on_event("startup")
+async def startup():
+    await seed_admin()
+    await migrate_statuses()
+    # Performance: create indexes for hot query paths
+    try:
+        await db.users.create_index("username", unique=True)
+        await db.users.create_index("id", unique=True)
+        await db.orders.create_index("id", unique=True)
+        await db.orders.create_index("created_at")
+        await db.orders.create_index("customer_id")
+        await db.orders.create_index("assigned_user_ids")
+        await db.orders.create_index("order_no")
+        await db.customers.create_index("id", unique=True)
+        await db.customers.create_index("phone")
+        await db.customers.create_index("updated_at")
+    except Exception as e:
+        logging.warning(f"Index creation warning: {e}")
+
 @app.post("/auth/login")
-async def bypass_login(data: LoginIn): return await login(data)
+async def bypass_login(data: LoginIn):
+    return await login(data)
 
 @app.get("/stats")
-async def bypass_stats(user=Depends(get_current_user)): return await stats(user)
+async def bypass_stats(user=Depends(get_current_user)):
+    return await stats(user)
 
 @app.get("/orders")
-async def bypass_orders(user=Depends(get_current_user)): return await list_orders(user)
+async def bypass_orders(user=Depends(get_current_user)):
+    return await list_orders(user)
 
 @app.post("/orders")
-async def bypass_create_order(data: OrderCreate, user=Depends(get_current_user)): return await create_order(data, user)
+async def bypass_create_order(data: OrderCreate, user=Depends(get_current_user)):
+    return await create_order(data, user)
 
-@app.get("/branding")
-async def bypass_branding(): return await get_branding()
+@app.middleware("http")
+async def add_api_prefix_if_missing(request, call_next):
+    if request.url.path.startswith("/auth") or request.url.path.startswith("/orders") or request.url.path.startswith("/stats") or request.url.path.startswith("/customers") or request.url.path.startswith("/settings"):
+        request.scope["path"] = f"/api{request.url.path}"
+    return await call_next(request)
 
+# --- YAHAN SE COPY KAREIN ---
+# Reminders Dismiss aur Restore ka special bypass rule
 @app.post("/reminders/dismiss")
 @api.post("/reminders/dismiss")
 async def bypass_dismiss_reminder(data: DismissIn):
-    await db.settings.update_one({"id": "default"}, {"$addToSet": {"dismissed_reminders": data.key}})
+    # Bina kisi strict admin check ke seedha database mein update
+    await db.settings.update_one(
+        {"id": "default"}, 
+        {"$addToSet": {"dismissed_reminders": data.key}}
+    )
     return {"ok": True}
 
 @app.post("/reminders/restore")
 @api.post("/reminders/restore")
 async def bypass_restore_reminder(data: DismissIn):
-    await db.settings.update_one({"id": "default"}, {"$pull": {"dismissed_reminders": data.key}})
+    await db.settings.update_one(
+        {"id": "default"}, 
+        {"$pull": {"dismissed_reminders": data.key}}
+    )
     return {"ok": True}
+# --- COPY YAHAN KHATAM ---
 
 app.include_router(api)
 
 from starlette.middleware.gzip import GZipMiddleware
 app.add_middleware(GZipMiddleware, minimum_size=500)
-app.add_middleware(CORSMiddleware, allow_credentials=True, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
 
-@app.on_event("startup")
-async def startup():
-    if await db.users.count_documents({}) == 0:
-        await db.users.insert_one({"id": str(uuid.uuid4()), "name": "Admin", "username": "admin", "password_hash": hash_pw("admin123"), "role": "admin", "created_at": datetime.now(timezone.utc)})
-    if not await db.settings.find_one({"id": "default"}):
-        await db.settings.insert_one(DEFAULT_SETTINGS.copy())
+# CORS: Bearer-token auth (no cookies), so allow_credentials=False permits the wildcard.
+# In production behind Vercel/Render this lets the React app hit FastAPI cross-origin without
+# the browser blocking responses due to the spec ban on "*" + credentials.
+_cors_origins_env = os.environ.get('CORS_ORIGINS', '*').strip()
+_allow_origins = ["*"] if _cors_origins_env in ("", "*") else [o.strip() for o in _cors_origins_env.split(',') if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_credentials=False,
+    allow_origins=_allow_origins,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
 @app.on_event("shutdown")
-async def shutdown_db_client(): client.close()
+async def shutdown_db_client():
+    client.close()
