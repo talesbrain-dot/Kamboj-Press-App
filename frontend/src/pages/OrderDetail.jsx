@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
-import api, { PRODUCT_STATUSES, STATUS_COLORS, formatINR, formatDate } from '../lib/api';
+import api, { STATUS_COLORS, formatINR, formatDate } from '../lib/api';
+import { useStatuses } from '../context/StatusesContext';
 import { useAuth } from '../context/AuthContext';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -18,11 +19,16 @@ const WA_TEMPLATES = {
   Designing: (o, p) => `Hello ${o.customer_name}, design work has started on "${p.name}" (Order ${o.order_no}).`,
   Offset: (o, p) => `Hello ${o.customer_name}, offset printing has started for "${p.name}" (Order ${o.order_no}).`,
   'Digital Printing': (o, p) => `Hello ${o.customer_name}, digital printing has started for "${p.name}" (Order ${o.order_no}).`,
-  'Screen Printing': (o, p) => `Hello ${o.customer_name}, screen printing has started for "${p.name}" (Order ${o.order_no}).`,
+  Printing: (o, p) => `Hello ${o.customer_name}, printing has started for "${p.name}" (Order ${o.order_no}).`,
   Binding: (o, p) => `Hello ${o.customer_name}, binding is in progress for "${p.name}" (Order ${o.order_no}).`,
-  Flex: (o, p) => `Hello ${o.customer_name}, flex work is in progress for "${p.name}" (Order ${o.order_no}).`,
   Ready: (o, p) => `Good news ${o.customer_name}! Your "${p.name}" (Order ${o.order_no}) is ready for pickup/delivery.`,
   Delivered: (o, p) => `Hello ${o.customer_name}, your "${p.name}" (Order ${o.order_no}) has been delivered. Thank you!`,
+};
+
+const waMessage = (status, o, p) => {
+  const fn = WA_TEMPLATES[status];
+  if (fn) return fn(o, p);
+  return `Hello ${o.customer_name}, update on your order ${o.order_no} — "${p.name}" is now: ${status}.`;
 };
 
 function waLink(phone, msg) {
@@ -35,6 +41,7 @@ export default function OrderDetail() {
   const navigate = useNavigate();
   const { user } = useAuth();
   const { toast } = useToast();
+  const { statuses: PRODUCT_STATUSES } = useStatuses();
   const isAdmin = user?.role === 'admin';
   const [order, setOrder] = useState(null);
   const [staff, setStaff] = useState([]);
@@ -83,6 +90,34 @@ export default function OrderDetail() {
     }
   };
 
+  const [editPayId, setEditPayId] = useState(null);
+  const [editPayAmt, setEditPayAmt] = useState('');
+
+  const startEditPayment = (p) => { setEditPayId(p.id); setEditPayAmt(String(p.amount)); };
+  const cancelEditPayment = () => { setEditPayId(null); setEditPayAmt(''); };
+  const saveEditPayment = async (paymentId) => {
+    const amt = Number(editPayAmt);
+    if (isNaN(amt) || amt < 0) { toast({ title: 'Enter a valid amount', variant: 'destructive' }); return; }
+    try {
+      const r = await api.patch(`/orders/${id}/payments/${paymentId}`, { amount: amt });
+      setOrder(r.data);
+      cancelEditPayment();
+      toast({ title: 'Payment updated' });
+    } catch (e) {
+      toast({ title: 'Update failed', description: e?.response?.data?.detail || '', variant: 'destructive' });
+    }
+  };
+  const deletePayment = async (paymentId) => {
+    if (!window.confirm('Yeh payment delete kar dein?')) return;
+    try {
+      const r = await api.delete(`/orders/${id}/payments/${paymentId}`);
+      setOrder(r.data);
+      toast({ title: 'Payment deleted' });
+    } catch (e) {
+      toast({ title: 'Delete failed', description: e?.response?.data?.detail || '', variant: 'destructive' });
+    }
+  };
+
   const saveAssign = async () => {
     try {
       const r = await api.patch(`/orders/${id}`, { assigned_user_ids: assignSel });
@@ -114,13 +149,11 @@ export default function OrderDetail() {
           <Link to={`/orders/${order.id}/invoice`}>
             <Button variant="outline"><FileText className="w-4 h-4 mr-2" />Invoice</Button>
           </Link>
+          <Link to={`/orders/${order.id}/edit`}>
+            <Button variant="outline"><Pencil className="w-4 h-4 mr-2" />Edit</Button>
+          </Link>
           {isAdmin && (
-            <Link to={`/orders/${order.id}/edit`}>
-              <Button variant="outline"><Pencil className="w-4 h-4 mr-2" />Edit</Button>
-            </Link>
-          )}
-          {isAdmin && (
-            <Button variant="outline" onClick={deleteOrder} className="text-rose-600 hover:text-rose-700">
+            <Button variant="outline" onClick={deleteOrder} className="text-rose-600 hover:text-rose-700" data-testid="delete-order-btn">
               <Trash2 className="w-4 h-4" />
             </Button>
           )}
@@ -157,7 +190,7 @@ export default function OrderDetail() {
                         <SelectTrigger className="w-36 h-8"><SelectValue /></SelectTrigger>
                         <SelectContent>{PRODUCT_STATUSES.map((s) => <SelectItem key={s} value={s}>{s}</SelectItem>)}</SelectContent>
                       </Select>
-                      <a href={waLink(order.customer_phone, WA_TEMPLATES[p.status](order, p))} target="_blank" rel="noreferrer">
+                      <a href={waLink(order.customer_phone, waMessage(p.status, order, p))} target="_blank" rel="noreferrer">
                         <Button size="icon" variant="outline" className="h-8 w-8 text-emerald-600 hover:text-emerald-700" title="Send WhatsApp update">
                           <MessageCircle className="w-4 h-4" />
                         </Button>
@@ -194,9 +227,52 @@ export default function OrderDetail() {
                 <p className="text-xs font-medium text-slate-500 mb-1">Payment history</p>
                 <ul className="text-xs space-y-1">
                   {order.payments.map((p) => (
-                    <li key={p.id} className="flex justify-between">
-                      <span>{formatDate(p.at)}</span>
-                      <span className="font-medium">{formatINR(p.amount)}</span>
+                    <li key={p.id} className="flex items-center justify-between gap-2" data-testid={`payment-row-${p.id}`}>
+                      <span className="text-slate-500 shrink-0">{formatDate(p.at)}</span>
+                      {isAdmin && editPayId === p.id ? (
+                        <>
+                          <Input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={editPayAmt}
+                            onChange={(e) => setEditPayAmt(e.target.value)}
+                            className="h-7 text-xs w-24 ml-auto"
+                            data-testid={`edit-payment-input-${p.id}`}
+                            autoFocus
+                          />
+                          <Button size="sm" className="h-7 px-2 bg-orange-500 hover:bg-orange-600 text-white" onClick={() => saveEditPayment(p.id)} data-testid={`save-payment-${p.id}`}>Save</Button>
+                          <Button size="sm" variant="ghost" className="h-7 px-2" onClick={cancelEditPayment}>×</Button>
+                        </>
+                      ) : (
+                        <>
+                          <span className="font-medium ml-auto">{formatINR(p.amount)}</span>
+                          {isAdmin && (
+                            <>
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                className="h-6 w-6"
+                                onClick={() => startEditPayment(p)}
+                                title="Edit payment"
+                                data-testid={`edit-payment-btn-${p.id}`}
+                              >
+                                <Pencil className="w-3 h-3" />
+                              </Button>
+                              <Button
+                                size="icon"
+                                variant="ghost"
+                                className="h-6 w-6 text-rose-600 hover:text-rose-700"
+                                onClick={() => deletePayment(p.id)}
+                                title="Delete payment"
+                                data-testid={`delete-payment-btn-${p.id}`}
+                              >
+                                <Trash2 className="w-3 h-3" />
+                              </Button>
+                            </>
+                          )}
+                        </>
+                      )}
                     </li>
                   ))}
                 </ul>

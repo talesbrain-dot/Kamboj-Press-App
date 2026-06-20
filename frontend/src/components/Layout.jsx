@@ -3,7 +3,7 @@ import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import { useTheme } from '../context/ThemeContext';
 import { useBranding } from '../context/BrandingContext';
-import { LayoutDashboard, ShoppingCart, Users, UserCog, Settings, LogOut, Moon, Sun, Menu, X, Printer, Bell, Wallet } from 'lucide-react';
+import { LayoutDashboard, ShoppingCart, Users, UserCog, Settings, LogOut, Moon, Sun, Menu, X, Printer, Bell, Wallet, BarChart3 } from 'lucide-react';
 import { Button } from './ui/button';
 import { cn } from '../lib/utils';
 
@@ -20,9 +20,10 @@ export default function Layout() {
     { to: '/', label: 'Dashboard', icon: LayoutDashboard, show: true },
     { to: '/orders/new', label: 'New Order', icon: ShoppingCart, show: true },
     { to: '/queue/Offset', label: 'Status', icon: Printer, show: true },
-    { to: '/reminders', label: 'Reminders', icon: Bell, show: isAdmin },
-    { to: '/balance', label: 'Balance', icon: Wallet, show: isAdmin },
-    { to: '/customers', label: 'Customers', icon: Users, show: isAdmin },
+    { to: '/reminders', label: 'Reminders', icon: Bell, show: true },
+    { to: '/balance', label: 'Balance', icon: Wallet, show: true },
+    { to: '/customers', label: 'Customers', icon: Users, show: true },
+    { to: '/analytics', label: 'Analytics', icon: BarChart3, show: isAdmin },
     { to: '/users', label: 'Team', icon: UserCog, show: isAdmin },
     { to: '/settings', label: 'Settings', icon: Settings, show: isAdmin },
   ].filter((i) => i.show);

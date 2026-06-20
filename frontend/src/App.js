@@ -4,6 +4,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { ThemeProvider } from './context/ThemeContext';
 import { BrandingProvider } from './context/BrandingContext';
+import { StatusesProvider } from './context/StatusesContext';
 import { Toaster } from './components/ui/toaster';
 import Layout from './components/Layout';
 import Login from './pages/Login';
@@ -19,6 +20,7 @@ import Reminders from './pages/Reminders';
 import EditOrder from './pages/EditOrder';
 import StatusQueue from './pages/StatusQueue';
 import Balance from './pages/Balance';
+import Analytics from './pages/Analytics';
 
 function Protected({ children, adminOnly = false }) {
   const { user, loading } = useAuth();
@@ -33,28 +35,31 @@ function App() {
     <ThemeProvider>
       <BrandingProvider>
         <AuthProvider>
-          <BrowserRouter>
-          <Routes>
-            <Route path="/login" element={<Login />} />
-            <Route element={<Protected><Layout /></Protected>}>
-              <Route path="/" element={<Dashboard />} />
-              <Route path="/orders/new" element={<NewOrder />} />
-              <Route path="/orders/:id" element={<OrderDetail />} />
-              <Route path="/orders/:id/edit" element={<Protected adminOnly><EditOrder /></Protected>} />
-              <Route path="/orders/:id/invoice" element={<Invoice />} />
-              <Route path="/customers" element={<Protected adminOnly><Customers /></Protected>} />
-              <Route path="/customers/:id" element={<Protected adminOnly><CustomerDetail /></Protected>} />
-              <Route path="/reminders" element={<Protected adminOnly><Reminders /></Protected>} />
-              <Route path="/queue" element={<StatusQueue />} />
-              <Route path="/queue/:status" element={<StatusQueue />} />
-              <Route path="/balance" element={<Protected adminOnly><Balance /></Protected>} />
-              <Route path="/users" element={<Protected adminOnly><Users /></Protected>} />
-              <Route path="/settings" element={<Protected adminOnly><Settings /></Protected>} />
-            </Route>
-            <Route path="*" element={<Navigate to="/" replace />} />
-          </Routes>
-        </BrowserRouter>
-        <Toaster />
+          <StatusesProvider>
+            <BrowserRouter>
+              <Routes>
+                <Route path="/login" element={<Login />} />
+                <Route element={<Protected><Layout /></Protected>}>
+                  <Route path="/" element={<Dashboard />} />
+                  <Route path="/orders/new" element={<NewOrder />} />
+                  <Route path="/orders/:id" element={<OrderDetail />} />
+                  <Route path="/orders/:id/edit" element={<EditOrder />} />
+                  <Route path="/orders/:id/invoice" element={<Invoice />} />
+                  <Route path="/customers" element={<Customers />} />
+                  <Route path="/customers/:id" element={<CustomerDetail />} />
+                  <Route path="/reminders" element={<Reminders />} />
+                  <Route path="/queue" element={<StatusQueue />} />
+                  <Route path="/queue/:status" element={<StatusQueue />} />
+                  <Route path="/balance" element={<Balance />} />
+                  <Route path="/analytics" element={<Protected adminOnly><Analytics /></Protected>} />
+                  <Route path="/users" element={<Protected adminOnly><Users /></Protected>} />
+                  <Route path="/settings" element={<Protected adminOnly><Settings /></Protected>} />
+                </Route>
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </Routes>
+            </BrowserRouter>
+            <Toaster />
+          </StatusesProvider>
         </AuthProvider>
       </BrandingProvider>
     </ThemeProvider>

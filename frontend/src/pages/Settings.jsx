@@ -1,22 +1,26 @@
 import React, { useEffect, useRef, useState } from 'react';
 import api from '../lib/api';
 import { useBranding } from '../context/BrandingContext';
+import { useStatuses } from '../context/StatusesContext';
 import { Card } from '../components/ui/card';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
 import { Textarea } from '../components/ui/textarea';
-import { Trash2, Plus, Upload, Loader2, Download, FileSpreadsheet, Cloud, CloudOff, RefreshCw, ExternalLink } from 'lucide-react';
+import { Trash2, Plus, Upload, Loader2, Download, FileSpreadsheet, Cloud, CloudOff, RefreshCw, ExternalLink, Tag } from 'lucide-react';
 import { useToast } from '../hooks/use-toast';
 
 export default function Settings() {
   const { toast } = useToast();
   const { refresh: refreshBranding } = useBranding();
+  const { statuses: allStatuses, builtin: builtinStatuses, custom: customStatuses, refresh: refreshStatuses } = useStatuses();
   const fileRef = useRef(null);
   const gdriveFileRef = useRef(null);
   const [s, setS] = useState(null);
   const [saving, setSaving] = useState(false);
   const [newReminder, setNewReminder] = useState({ label: '', days: 3 });
+  const [newStatus, setNewStatus] = useState('');
+  const [statusBusy, setStatusBusy] = useState(false);
 
   // Google Drive state
   const [gdrive, setGdrive] = useState(null);
@@ -78,6 +82,41 @@ export default function Settings() {
   };
 
   const removeReminder = (i) => update('custom_reminders', s.custom_reminders.filter((_, idx) => idx !== i));
+
+  // ---------- Status options ----------
+  const addStatus = async () => {
+    const name = newStatus.trim();
+    if (!name) return;
+    setStatusBusy(true);
+    try {
+      await api.post('/statuses', { name });
+      setNewStatus('');
+      await refreshStatuses();
+      toast({ title: 'Status added', description: name });
+    } catch (e) {
+      toast({
+        title: 'Could not add status',
+        description: e?.response?.data?.detail || 'Try again',
+        variant: 'destructive',
+      });
+    } finally { setStatusBusy(false); }
+  };
+
+  const removeStatus = async (name) => {
+    if (!window.confirm(`Delete status "${name}"? Products using it will reset to Pending.`)) return;
+    setStatusBusy(true);
+    try {
+      await api.delete(`/statuses/${encodeURIComponent(name)}`);
+      await refreshStatuses();
+      toast({ title: 'Status removed', description: name });
+    } catch (e) {
+      toast({
+        title: 'Could not delete',
+        description: e?.response?.data?.detail || 'Try again',
+        variant: 'destructive',
+      });
+    } finally { setStatusBusy(false); }
+  };
 
   const exportBackup = async () => {
     try {
@@ -302,6 +341,66 @@ export default function Settings() {
             <Button className="col-span-2" variant="outline" onClick={addReminder}><Plus className="w-4 h-4" /></Button>
           </div>
         </div>
+      </Card>
+
+      <Card className="p-5 space-y-3" data-testid="status-options-card">
+        <h2 className="font-medium flex items-center gap-2"><Tag className="w-4 h-4 text-orange-500" />Status Options</h2>
+        <p className="text-sm text-slate-500 dark:text-slate-400">
+          Apne workflow ke hisaab se naye status add karein (e.g. <i>Lamination</i>, <i>QC</i>). Built-in statuses delete nahi ho sakte.
+        </p>
+        <div className="space-y-2">
+          <Label className="text-xs uppercase tracking-wide text-slate-500">Built-in</Label>
+          <div className="flex flex-wrap gap-1.5">
+            {builtinStatuses.map((st) => (
+              <span key={st} className="text-xs px-2 py-1 rounded-md bg-slate-100 dark:bg-slate-800 text-slate-700 dark:text-slate-200 border border-slate-200 dark:border-slate-700">
+                {st}
+              </span>
+            ))}
+          </div>
+        </div>
+        <div className="space-y-2 pt-2 border-t border-slate-200 dark:border-slate-800">
+          <Label className="text-xs uppercase tracking-wide text-slate-500">Custom ({customStatuses.length})</Label>
+          {customStatuses.length === 0 ? (
+            <p className="text-xs text-slate-400">No custom statuses yet.</p>
+          ) : (
+            <ul className="flex flex-wrap gap-1.5">
+              {customStatuses.map((st) => (
+                <li key={st} className="flex items-center gap-1 text-xs pl-2 pr-1 py-1 rounded-md bg-orange-50 dark:bg-orange-900/30 text-orange-800 dark:text-orange-200 border border-orange-200 dark:border-orange-900">
+                  <span>{st}</span>
+                  <button
+                    type="button"
+                    onClick={() => removeStatus(st)}
+                    disabled={statusBusy}
+                    className="hover:bg-orange-200 dark:hover:bg-orange-800 rounded p-0.5"
+                    data-testid={`remove-status-${st}`}
+                    title="Delete status"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="grid grid-cols-12 gap-2 pt-2">
+          <Input
+            className="col-span-9 sm:col-span-10"
+            placeholder="New status name (e.g. Lamination)"
+            value={newStatus}
+            onChange={(e) => setNewStatus(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addStatus(); } }}
+            data-testid="new-status-input"
+          />
+          <Button
+            className="col-span-3 sm:col-span-2 bg-orange-500 hover:bg-orange-600 text-white"
+            onClick={addStatus}
+            disabled={statusBusy || !newStatus.trim()}
+            data-testid="add-status-btn"
+          >
+            {statusBusy ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+          </Button>
+        </div>
+        <p className="text-xs text-slate-400">Total {allStatuses.length} statuses available app-wide.</p>
       </Card>
 
       <Card className="p-5 space-y-3" data-testid="invoice-terms-card">

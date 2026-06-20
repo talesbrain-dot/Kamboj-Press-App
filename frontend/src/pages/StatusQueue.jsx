@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
-import api, { formatINR, formatDate, STATUS_COLORS, PRODUCT_STATUSES } from '../lib/api';
+import api, { formatINR, formatDate, STATUS_COLORS } from '../lib/api';
+import { useStatuses } from '../context/StatusesContext';
 import { Card } from '../components/ui/card';
 import { Input } from '../components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '../components/ui/select';
@@ -9,6 +10,7 @@ import { useToast } from '../hooks/use-toast';
 
 export default function StatusQueue() {
   const { status: paramStatus } = useParams();
+  const { statuses: PRODUCT_STATUSES } = useStatuses();
   const initial = paramStatus && PRODUCT_STATUSES.includes(paramStatus) ? paramStatus : 'Offset';
   const { toast } = useToast();
   const [status, setStatus] = useState(initial);

@@ -6,7 +6,7 @@ import { Card } from '../components/ui/card';
 import { Input } from '../components/ui/input';
 import { Button } from '../components/ui/button';
 import { Badge } from '../components/ui/badge';
-import { Bell, Plus, Search, ShoppingCart, IndianRupee, CheckCircle2, Clock, MessageCircle } from 'lucide-react';
+import { Bell, Plus, Search, ShoppingCart, MessageCircle } from 'lucide-react';
 
 function orderOverallStatus(o) {
   const s = (o.products || []).map((p) => p.status);
@@ -17,37 +17,19 @@ function orderOverallStatus(o) {
   return 'In Progress';
 }
 
-function StatCard({ icon: Icon, label, value, accent }) {
-  return (
-    <Card className="p-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">{label}</p>
-          <p className="text-2xl font-semibold mt-1">{value}</p>
-        </div>
-        <div className={`w-10 h-10 rounded-md flex items-center justify-center ${accent}`}>
-          <Icon className="w-5 h-5" />
-        </div>
-      </div>
-    </Card>
-  );
-}
-
 export default function Dashboard() {
   const { user } = useAuth();
   const isAdmin = user?.role === 'admin';
   const [orders, setOrders] = useState([]);
   const [reminders, setReminders] = useState([]);
-  const [stats, setStats] = useState(null);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(true);
 
   const load = async () => {
     setLoading(true);
     try {
-      const [oRes, sRes] = await Promise.all([api.get('/orders'), api.get('/stats')]);
+      const oRes = await api.get('/orders');
       setOrders(oRes.data);
-      setStats(sRes.data);
       if (isAdmin) {
         const r = await api.get('/reminders', { params: { include_seen: false } });
         setReminders(r.data);
@@ -74,7 +56,7 @@ export default function Dashboard() {
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Dashboard</h1>
-          <p className="text-sm text-slate-500 dark:text-slate-400">{isAdmin ? 'All orders, latest first' : 'Orders assigned to you'}</p>
+          <p className="text-sm text-slate-500 dark:text-slate-400">All orders, latest first</p>
         </div>
         {isAdmin || user?.role === 'staff' ? (
           <Link to="/orders/new">
@@ -123,33 +105,7 @@ export default function Dashboard() {
         </Card>
       )}
 
-      {/* Stats */}
-      {stats && (
-        <>
-          <div>
-            <h2 className="text-sm font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">All-time</h2>
-            <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-              <StatCard icon={ShoppingCart} label="Total Orders" value={stats.total_orders} accent="bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300" />
-              <StatCard icon={IndianRupee} label="Total Amount" value={formatINR(stats.total_revenue)} accent="bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300" />
-              <StatCard icon={Clock} label="In Progress" value={stats.in_progress} accent="bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300" />
-              <StatCard icon={CheckCircle2} label="Delivered" value={stats.delivered} accent="bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300" />
-              <StatCard icon={IndianRupee} label="Balance Due" value={formatINR(stats.balance_due)} accent="bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300" />
-            </div>
-          </div>
-          {stats.today && (
-            <div>
-              <h2 className="text-sm font-medium text-slate-500 dark:text-slate-400 uppercase tracking-wide mb-2">Today</h2>
-              <div className="grid grid-cols-2 lg:grid-cols-5 gap-3">
-                <StatCard icon={ShoppingCart} label="Today's Orders" value={stats.today.total_orders} accent="bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300" />
-                <StatCard icon={IndianRupee} label="Today's Amount" value={formatINR(stats.today.total_revenue)} accent="bg-violet-100 text-violet-700 dark:bg-violet-900/40 dark:text-violet-300" />
-                <StatCard icon={Clock} label="In Progress" value={stats.today.in_progress} accent="bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300" />
-                <StatCard icon={CheckCircle2} label="Delivered" value={stats.today.delivered} accent="bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300" />
-                <StatCard icon={IndianRupee} label="Balance Due" value={formatINR(stats.today.balance_due)} accent="bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-300" />
-              </div>
-            </div>
-          )}
-        </>
-      )}
+      {/* Stats moved to /analytics (admin only) */}
 
       {/* Search */}
       <Card className="p-3">

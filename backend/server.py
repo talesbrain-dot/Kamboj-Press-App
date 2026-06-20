@@ -40,7 +40,20 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 app = FastAPI()
 api = APIRouter(prefix="/api")
 
-PRODUCT_STATUSES = ["Pending", "Designing", "Offset", "Digital Printing", "Screen Printing", "Binding", "Flex", "Ready", "Delivered"]
+BUILTIN_STATUSES = ["Pending", "Designing", "Offset", "Digital Printing", "Printing", "Binding", "Ready", "Delivered"]
+PROTECTED_STATUSES = {"Pending", "Delivered"}  # cannot be deleted/renamed
+
+async def get_allowed_statuses() -> list:
+    s = await db.settings.find_one({"id": "default"}, {"custom_statuses": 1})
+    custom = (s or {}).get("custom_statuses") or []
+    seen = set()
+    out = []
+    for st in list(BUILTIN_STATUSES) + list(custom):
+        st = (st or "").strip()
+        if st and st not in seen:
+            seen.add(st)
+            out.append(st)
+    return out
 
 # ---------- Models ----------
 class UserCreate(BaseModel):
@@ -112,6 +125,7 @@ class SettingsIn(BaseModel):
     reminder_payment_days: Optional[int] = None
     custom_reminders: Optional[List[dict]] = None
     invoice_terms: Optional[str] = None
+    custom_statuses: Optional[List[str]] = None
 
 class DismissIn(BaseModel):
     key: str
@@ -311,9 +325,10 @@ async def create_order(data: OrderCreate, user=Depends(get_current_user)):
     customer_id = await upsert_customer(data.customer_name, data.customer_phone, data.customer_address or "")
     order_no = await next_order_no()
     now = datetime.now(timezone.utc)
+    allowed_statuses = await get_allowed_statuses()
     products = []
     for p in data.products:
-        st = p.status if p.status in PRODUCT_STATUSES else "Pending"
+        st = p.status if p.status in allowed_statuses else "Pending"
         products.append({
             "id": str(uuid.uuid4()),
             "name": p.name.strip(),
@@ -372,14 +387,14 @@ async def get_order(order_id: str, user=Depends(get_current_user)):
 async def update_order(order_id: str, data: OrderUpdateIn, user=Depends(get_current_user)):
     o = await db.orders.find_one({"id": order_id})
     if not o: raise HTTPException(404, "Order not found")
-    if user["role"] == "staff":
-        raise HTTPException(403, "Only admins can modify order")
     now = datetime.now(timezone.utc)
     update = {"updated_at": now}
     if data.assigned_user_ids is not None: update["assigned_user_ids"] = data.assigned_user_ids
     if data.customer_address is not None: update["customer_address"] = data.customer_address
     if data.notes is not None: update["notes"] = data.notes
-    if data.advance_paid is not None: update["advance_paid"] = float(data.advance_paid)
+    # Staff is NOT allowed to change advance_paid after order creation (only admin).
+    if data.advance_paid is not None and user.get("role") == "admin":
+        update["advance_paid"] = float(data.advance_paid)
 
     new_name = data.customer_name.strip() if data.customer_name else None
     new_phone = data.customer_phone.strip() if data.customer_phone else None
@@ -397,9 +412,10 @@ async def update_order(order_id: str, data: OrderUpdateIn, user=Depends(get_curr
     if data.products is not None:
         if not data.products:
             raise HTTPException(400, "At least one product is required")
+        allowed_statuses = await get_allowed_statuses()
         new_products = []
         for p in data.products:
-            st = p.status if p.status in PRODUCT_STATUSES else "Pending"
+            st = p.status if p.status in allowed_statuses else "Pending"
             prod = {
                 "id": str(uuid.uuid4()),
                 "name": p.name.strip(),
@@ -419,7 +435,8 @@ async def update_order(order_id: str, data: OrderUpdateIn, user=Depends(get_curr
 
 @api.patch("/orders/{order_id}/products/{product_id}")
 async def update_product_status(order_id: str, product_id: str, data: StatusUpdateIn, user=Depends(get_current_user)):
-    if data.status not in PRODUCT_STATUSES:
+    allowed_statuses = await get_allowed_statuses()
+    if data.status not in allowed_statuses:
         raise HTTPException(400, "Invalid status")
     o = await db.orders.find_one({"id": order_id})
     if not o: raise HTTPException(404, "Order not found")
@@ -448,6 +465,51 @@ async def add_payment(order_id: str, data: PaymentIn, user=Depends(get_current_u
     schedule_gdrive_sync()
     return serialize_order(o)
 
+
+class PaymentUpdateIn(BaseModel):
+    amount: Optional[float] = None
+    note: Optional[str] = None
+
+
+@api.patch("/orders/{order_id}/payments/{payment_id}")
+async def update_payment(order_id: str, payment_id: str, data: PaymentUpdateIn, admin=Depends(require_admin)):
+    o = await db.orders.find_one({"id": order_id})
+    if not o: raise HTTPException(404, "Order not found")
+    if not any(p.get("id") == payment_id for p in o.get("payments", [])):
+        raise HTTPException(404, "Payment not found")
+    update = {"updated_at": datetime.now(timezone.utc)}
+    set_ops = {}
+    if data.amount is not None:
+        if data.amount < 0: raise HTTPException(400, "Amount must be >= 0")
+        set_ops["payments.$[p].amount"] = float(data.amount)
+    if data.note is not None:
+        set_ops["payments.$[p].note"] = data.note
+    if set_ops:
+        await db.orders.update_one(
+            {"id": order_id},
+            {"$set": {**set_ops, **update}},
+            array_filters=[{"p.id": payment_id}],
+        )
+    o = await db.orders.find_one({"id": order_id})
+    schedule_gdrive_sync()
+    return serialize_order(o)
+
+
+@api.delete("/orders/{order_id}/payments/{payment_id}")
+async def delete_payment(order_id: str, payment_id: str, admin=Depends(require_admin)):
+    o = await db.orders.find_one({"id": order_id})
+    if not o: raise HTTPException(404, "Order not found")
+    res = await db.orders.update_one(
+        {"id": order_id},
+        {"$pull": {"payments": {"id": payment_id}}, "$set": {"updated_at": datetime.now(timezone.utc)}},
+    )
+    if res.modified_count == 0:
+        raise HTTPException(404, "Payment not found")
+    o = await db.orders.find_one({"id": order_id})
+    schedule_gdrive_sync()
+    return serialize_order(o)
+
+
 @api.delete("/orders/{order_id}")
 async def delete_order(order_id: str, admin=Depends(require_admin)):
     res = await db.orders.delete_one({"id": order_id})
@@ -463,12 +525,9 @@ async def reminders(request: Request, include_seen: bool = True, user=Depends(ge
     referer = request.headers.get("referer", "")
     
     # 🔥 Agar url mein 'dashboard' word hai, toh reminders mat dikhao!
-    if "dashboard" in referer.lower():
+    if "dashboard" in referer.lower() and user.get("role") != "staff":
         return []
 
-    if user["role"] == "staff":
-        return []
-        
     s = await db.settings.find_one({"id": "default"}) or {}
     in_proc_days = s.get("reminder_in_process_days", 2)
     delivery_days = s.get("reminder_delivery_days", 7)
@@ -561,6 +620,7 @@ DEFAULT_SETTINGS = {
     "custom_reminders": [],
     "invoice_terms": "1. Goods once sold will not be taken back.\n2. Payment due within 7 days of delivery.\n3. Subject to local jurisdiction.",
     "dismissed_reminders": [],
+    "custom_statuses": [],
 }
 
 @api.get("/settings")
@@ -1165,10 +1225,12 @@ async def gdrive_disconnect(admin=Depends(require_admin)):
 # ---------- Stats ----------
 @app.get("/stats")
 @api.get("/stats")
-async def stats(user=Depends(get_current_user)):
-    q = {} if user.get("role") == "admin" else {"assigned_user_ids": user.get("id")}
-    # MongoDB se direct raw orders uthayein (bina kisi string conversion ke)
-    orders = await db.orders.find(q).to_list(1000)
+async def stats(user=Depends(get_current_user), year: Optional[int] = None, month: Optional[int] = None):
+    """
+    All-time + today by default. Optional ?year=YYYY filters by year (IST).
+    Optional ?year=YYYY&month=MM filters by specific month.
+    """
+    orders = await db.orders.find().to_list(5000)
 
     def aggregate(order_list):
         total_orders = len(order_list)
@@ -1179,11 +1241,11 @@ async def stats(user=Depends(get_current_user)):
         for o in order_list:
             statuses = [p.get("status") for p in o.get("products", [])]
             if not statuses: continue
-            if all(s == "Delivered" for s in statuses): 
+            if all(s == "Delivered" for s in statuses):
                 delivered += 1
-            elif all(s == "Pending" for s in statuses): 
+            elif all(s == "Pending" for s in statuses):
                 pending += 1
-            else: 
+            else:
                 in_progress += 1
         return {
             "total_orders": total_orders,
@@ -1195,39 +1257,123 @@ async def stats(user=Depends(get_current_user)):
             "delivered": delivered,
         }
 
-    # Timezone Proof String Matching Logic
-    # --- SERVER.PY KE STATS FUNCTION KA AAKHIRI HISSA (ISE REPLACE KARO) ---
-    try:
-        IST = timezone(timedelta(hours=5, minutes=30))
-        today_date_str = datetime.now(IST).strftime("%Y-%m-%d")
-        
-        today_orders = []
-        for o in orders:
-            ca = o.get("created_at")
-            if not ca: continue
-            
-            if isinstance(ca, str):
-                order_date_str = ca[:10] 
-            else:
-                if ca.tzinfo is None:
-                    ca = ca.replace(tzinfo=timezone.utc)
-                ca_ist = ca.astimezone(IST)
-                order_date_str = ca_ist.strftime("%Y-%m-%d")
-            
-            if order_date_str == today_date_str:
-                today_orders.append(o)
-    except Exception as e:
-        print(f"Error in today stats: {e}")
-        today_orders = []
+    IST = timezone(timedelta(hours=5, minutes=30))
 
-    result = aggregate(orders)
+    def order_ist_date(o):
+        ca = o.get("created_at")
+        if not ca: return None
+        if isinstance(ca, str):
+            try:
+                ca = datetime.fromisoformat(ca.replace("Z", "+00:00"))
+            except Exception:
+                return ca[:10]
+        if ca.tzinfo is None:
+            ca = ca.replace(tzinfo=timezone.utc)
+        return ca.astimezone(IST)
+
+    # Period filter (year / month)
+    period_orders = orders
+    period_label = None
+    if year is not None:
+        period_orders = []
+        for o in orders:
+            d = order_ist_date(o)
+            if isinstance(d, datetime) and d.year == year:
+                if month is None or d.month == month:
+                    period_orders.append(o)
+        if month is not None:
+            period_label = f"{year}-{month:02d}"
+        else:
+            period_label = str(year)
+
+    # Today aggregate
+    today_str = datetime.now(IST).strftime("%Y-%m-%d")
+    today_orders = []
+    for o in orders:
+        d = order_ist_date(o)
+        ds = d.strftime("%Y-%m-%d") if isinstance(d, datetime) else (d if isinstance(d, str) else None)
+        if ds == today_str:
+            today_orders.append(o)
+
+    result = aggregate(period_orders if year is not None else orders)
     result["today"] = aggregate(today_orders)
-    
-    # Dashboard se reminders ko poori tarah hatane ke liye (Perfect Spacing)
+    result["period"] = period_label
     result["reminders"] = []
-    
     return result
-    
+
+
+@api.get("/stats/periods")
+async def stats_periods(admin=Depends(require_admin)):
+    """Returns available years and (year, month) pairs based on existing orders (IST)."""
+    orders = await db.orders.find({}, {"created_at": 1}).to_list(20000)
+    IST = timezone(timedelta(hours=5, minutes=30))
+    year_set = set()
+    ym_set = set()
+    for o in orders:
+        ca = o.get("created_at")
+        if not ca: continue
+        if isinstance(ca, str):
+            try:
+                ca = datetime.fromisoformat(ca.replace("Z", "+00:00"))
+            except Exception:
+                continue
+        if ca.tzinfo is None:
+            ca = ca.replace(tzinfo=timezone.utc)
+        d = ca.astimezone(IST)
+        year_set.add(d.year)
+        ym_set.add((d.year, d.month))
+    return {
+        "years": sorted(year_set, reverse=True),
+        "months": sorted([{"year": y, "month": m} for (y, m) in ym_set], key=lambda x: (-x["year"], -x["month"])),
+    }
+# ---------- Statuses ----------
+class StatusIn(BaseModel):
+    name: str
+
+@api.get("/statuses")
+async def list_statuses(user=Depends(get_current_user)):
+    statuses = await get_allowed_statuses()
+    s = await db.settings.find_one({"id": "default"}, {"custom_statuses": 1}) or {}
+    return {
+        "statuses": statuses,
+        "builtin": BUILTIN_STATUSES,
+        "custom": s.get("custom_statuses") or [],
+        "protected": list(PROTECTED_STATUSES),
+    }
+
+@api.post("/statuses")
+async def add_status(data: StatusIn, admin=Depends(require_admin)):
+    name = (data.name or "").strip()
+    if not name:
+        raise HTTPException(400, "Status name is required")
+    if len(name) > 40:
+        raise HTTPException(400, "Status name too long")
+    existing = await get_allowed_statuses()
+    if name in existing:
+        raise HTTPException(400, "Status already exists")
+    s = await db.settings.find_one({"id": "default"}) or {}
+    custom = list(s.get("custom_statuses") or [])
+    custom.append(name)
+    await db.settings.update_one({"id": "default"}, {"$set": {"custom_statuses": custom}}, upsert=True)
+    return {"ok": True, "statuses": await get_allowed_statuses()}
+
+@api.delete("/statuses/{name}")
+async def delete_status(name: str, admin=Depends(require_admin)):
+    if name in PROTECTED_STATUSES:
+        raise HTTPException(400, f"'{name}' is protected and cannot be deleted")
+    if name in BUILTIN_STATUSES:
+        raise HTTPException(400, f"'{name}' is a built-in status and cannot be deleted")
+    s = await db.settings.find_one({"id": "default"}) or {}
+    custom = [c for c in (s.get("custom_statuses") or []) if c != name]
+    await db.settings.update_one({"id": "default"}, {"$set": {"custom_statuses": custom}}, upsert=True)
+    # Reset any products still using this status back to "Pending"
+    await db.orders.update_many(
+        {"products.status": name},
+        {"$set": {"products.$[p].status": "Pending"}},
+        array_filters=[{"p.status": name}],
+    )
+    return {"ok": True, "statuses": await get_allowed_statuses()}
+
 # ---------- Init ----------
 async def seed_admin():
     if await db.users.count_documents({}) == 0:
@@ -1266,19 +1412,51 @@ async def migrate_statuses():
     if res.modified_count:
         logging.info(f"Migrated {res.modified_count} order(s): Cutting -> Binding")
 
-    # Migrate Packing -> Flex
+    # Migrate Packing -> Pending (Flex removed from builtin statuses)
     res = await db.orders.update_many(
         {"products.status": "Packing"},
-        {"$set": {"products.$[p].status": "Flex"}},
+        {"$set": {"products.$[p].status": "Pending"}},
         array_filters=[{"p.status": "Packing"}],
     )
     if res.modified_count:
-        logging.info(f"Migrated {res.modified_count} order(s): Packing -> Flex")
+        logging.info(f"Migrated {res.modified_count} order(s): Packing -> Pending")
+
+    # Flex removed: reset existing Flex products to Pending
+    res = await db.orders.update_many(
+        {"products.status": "Flex"},
+        {"$set": {"products.$[p].status": "Pending"}},
+        array_filters=[{"p.status": "Flex"}],
+    )
+    if res.modified_count:
+        logging.info(f"Migrated {res.modified_count} order(s): Flex -> Pending")
+
+    # Rename Screen Printing -> Printing
+    res = await db.orders.update_many(
+        {"products.status": "Screen Printing"},
+        {"$set": {"products.$[p].status": "Printing"}},
+        array_filters=[{"p.status": "Screen Printing"}],
+    )
+    if res.modified_count:
+        logging.info(f"Migrated {res.modified_count} order(s): Screen Printing -> Printing")
 
 @app.on_event("startup")
 async def startup():
     await seed_admin()
     await migrate_statuses()
+    # Performance: create indexes for hot query paths
+    try:
+        await db.users.create_index("username", unique=True)
+        await db.users.create_index("id", unique=True)
+        await db.orders.create_index("id", unique=True)
+        await db.orders.create_index("created_at")
+        await db.orders.create_index("customer_id")
+        await db.orders.create_index("assigned_user_ids")
+        await db.orders.create_index("order_no")
+        await db.customers.create_index("id", unique=True)
+        await db.customers.create_index("phone")
+        await db.customers.create_index("updated_at")
+    except Exception as e:
+        logging.warning(f"Index creation warning: {e}")
 
 @app.post("/auth/login")
 async def bypass_login(data: LoginIn):
@@ -1325,6 +1503,9 @@ async def bypass_restore_reminder(data: DismissIn):
 # --- COPY YAHAN KHATAM ---
 
 app.include_router(api)
+
+from starlette.middleware.gzip import GZipMiddleware
+app.add_middleware(GZipMiddleware, minimum_size=500)
 
 app.add_middleware(
     CORSMiddleware,

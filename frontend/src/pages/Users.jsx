@@ -38,8 +38,17 @@ export default function Users() {
 
   const remove = async (id) => {
     if (!window.confirm('Delete this user?')) return;
-    try { await api.delete(`/users/${id}`); load(); toast({ title: 'Deleted' }); }
-    catch { toast({ title: 'Failed', variant: 'destructive' }); }
+    try {
+      await api.delete(`/users/${id}`);
+      toast({ title: 'Deleted' });
+      load();
+    } catch (e) {
+      toast({
+        title: 'Delete failed',
+        description: e?.response?.data?.detail || e?.message || 'Network error',
+        variant: 'destructive',
+      });
+    }
   };
 
   return (

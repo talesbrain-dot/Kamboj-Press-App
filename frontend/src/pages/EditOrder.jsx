@@ -1,6 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import api, { PRODUCT_STATUSES, formatINR } from '../lib/api';
+import api, { formatINR } from '../lib/api';
+import { useStatuses } from '../context/StatusesContext';
+import { useAuth } from '../context/AuthContext';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
 import { Label } from '../components/ui/label';
@@ -15,6 +17,9 @@ export default function EditOrder() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { toast } = useToast();
+  const { statuses: PRODUCT_STATUSES } = useStatuses();
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const [order, setOrder] = useState(null);
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
@@ -182,13 +187,17 @@ export default function EditOrder() {
 
       <Card className="p-5 space-y-4">
         <h2 className="font-medium">Payment & Notes</h2>
-        <div className="grid sm:grid-cols-2 gap-4">
-          <div className="space-y-1.5">
-            <Label>Advance Paid</Label>
-            <Input type="number" min="0" step="0.01" value={advance} onChange={(e) => setAdvance(e.target.value)} />
-            <p className="text-xs text-slate-500">Additional balance payments (post-creation) are kept as-is.</p>
+        {isAdmin ? (
+          <div className="grid sm:grid-cols-2 gap-4">
+            <div className="space-y-1.5">
+              <Label>Advance Paid</Label>
+              <Input type="number" min="0" step="0.01" value={advance} onChange={(e) => setAdvance(e.target.value)} />
+              <p className="text-xs text-slate-500">Additional balance payments (post-creation) are kept as-is.</p>
+            </div>
           </div>
-        </div>
+        ) : (
+          <p className="text-xs text-slate-500">Advance / payments admin-only hain. Aap baaki details edit kar sakte ho.</p>
+        )}
         <div className="space-y-1.5">
           <Label>Order Notes</Label>
           <Textarea rows={2} value={notes} onChange={(e) => setNotes(e.target.value)} />

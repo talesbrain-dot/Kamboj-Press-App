@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import api, { PRODUCT_STATUSES, formatINR } from '../lib/api';
+import api, { formatINR } from '../lib/api';
+import { useStatuses } from '../context/StatusesContext';
 import { useAuth } from '../context/AuthContext';
 import { Button } from '../components/ui/button';
 import { Input } from '../components/ui/input';
@@ -16,6 +17,7 @@ export default function NewOrder() {
   const navigate = useNavigate();
   const { toast } = useToast();
   const { user } = useAuth();
+  const { statuses: PRODUCT_STATUSES } = useStatuses();
   const isAdmin = user?.role === 'admin';
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');

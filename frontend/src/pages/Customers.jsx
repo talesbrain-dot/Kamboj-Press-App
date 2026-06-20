@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import api, { formatDate, formatINR } from '../lib/api';
+import { useAuth } from '../context/AuthContext';
 import { Card } from '../components/ui/card';
 import { Input } from '../components/ui/input';
 import { Button } from '../components/ui/button';
@@ -8,6 +9,8 @@ import { Search, Phone, User, Trash2 } from 'lucide-react';
 import { useToast } from '../hooks/use-toast';
 
 export default function Customers() {
+  const { user } = useAuth();
+  const isAdmin = user?.role === 'admin';
   const { toast } = useToast();
   const [list, setList] = useState([]);
   const [q, setQ] = useState('');
@@ -86,16 +89,18 @@ export default function Customers() {
                     <div className="text-[10px] uppercase tracking-wide text-slate-400">Balance</div>
                   </div>
                   <div className="text-xs text-slate-500 hidden sm:block">{formatDate(c.updated_at)}</div>
-                  <Button
-                    variant="ghost"
-                    size="icon"
-                    onClick={(e) => remove(e, c)}
-                    disabled={deletingId === c.id}
-                    title="Delete customer"
-                    data-testid={`delete-customer-${c.id}`}
-                  >
-                    <Trash2 className="w-4 h-4 text-rose-500" />
-                  </Button>
+                  {isAdmin && (
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      onClick={(e) => remove(e, c)}
+                      disabled={deletingId === c.id}
+                      title="Delete customer"
+                      data-testid={`delete-customer-${c.id}`}
+                    >
+                      <Trash2 className="w-4 h-4 text-rose-500" />
+                    </Button>
+                  )}
                 </div>
               </div>
             ))}
