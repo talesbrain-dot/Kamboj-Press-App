@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 import jwt
 from passlib.context import CryptContext
+import bcrypt as _bcrypt
 
 from pymongo import ReturnDocument
 from openpyxl import Workbook
@@ -136,8 +137,16 @@ class DismissIn(BaseModel):
     key: str
 
 # ---------- Helpers ----------
-def hash_pw(p): return pwd_ctx.hash(p)
-def verify_pw(p, h): return pwd_ctx.verify(p, h)
+def hash_pw(p):
+    # bcrypt has a 72-byte limit; truncate utf-8 encoded password to be safe
+    return _bcrypt.hashpw(p.encode("utf-8")[:72], _bcrypt.gensalt()).decode("utf-8")
+
+def verify_pw(p, h):
+    # Backward compatible with existing $2b$ hashes created by passlib (same format)
+    try:
+        return _bcrypt.checkpw(p.encode("utf-8")[:72], h.encode("utf-8"))
+    except Exception:
+        return False
 
 def make_token(user_id: str):
     payload = {"sub": user_id, "exp": datetime.now(timezone.utc) + timedelta(days=ACCESS_TOKEN_EXPIRE_DAYS)}
